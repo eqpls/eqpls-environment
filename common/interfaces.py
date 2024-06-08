@@ -7,14 +7,13 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
-import json as JSON
 import urllib3
-import asyncio
 import aiohttp
 import requests
+from json import loads
 from fastapi import Request
 from aiohttp.client_exceptions import ClientResponseError
-from .constants import EpException
+from .exceptions import EpException
 
 #===============================================================================
 # Setting
@@ -25,22 +24,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 #===============================================================================
 # Implement
 #===============================================================================
-class TaskOperator:
-
-    def __init__(self): self._task_operator_tasks = []
-
-    def __enter__(self): return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb): pass
-
-    def do(self, ref):
-        self._task_operator_tasks.append(ref)
-        return self
-
-    async def wait(self):
-        return await asyncio.gather(*(self._task_operator_tasks))
-
-
 class SyncRest:
 
     def __init__(self, baseUrl=''):
@@ -99,8 +82,7 @@ class AsyncRest:
     async def proxy(self, request:Request):
         method = request.scope['method']
         url = request.scope['path']
-        if request.scope['query_string']:
-            url = f'{url}?{request.scope["query_string"].decode("latin-1")}'
+        if request.scope['query_string']: url = f'{url}?{request.scope["query_string"].decode("latin-1")}'
         _method = self.__getattribute__(method.lower())
         try:
             if method in ['GET', 'DELETE']: return await _method(url)
@@ -112,7 +94,7 @@ class AsyncRest:
         try:
             async with self.session.get(f'{self.baseUrl}{url}', headers=headers) as res:
                 data = await res.text()
-                try: return JSON.loads(data)
+                try: return loads(data)
                 except: return data
         except ClientResponseError as e:
             raise EpException(e.status, e.message)
@@ -121,7 +103,7 @@ class AsyncRest:
         try:
             async with self.session.post(f'{self.baseUrl}{url}', data=data, json=json, headers=headers) as res:
                 data = await res.text()
-                try: return JSON.loads(data)
+                try: return loads(data)
                 except: return data
         except ClientResponseError as e:
             raise EpException(e.status, e.message)
@@ -130,7 +112,7 @@ class AsyncRest:
         try:
             async with self.session.put(f'{self.baseUrl}{url}', data=data, json=json, headers=headers) as res:
                 data = await res.text()
-                try: return JSON.loads(data)
+                try: return loads(data)
                 except: return data
         except ClientResponseError as e:
             raise EpException(e.status, e.message)
@@ -139,7 +121,7 @@ class AsyncRest:
         try:
             async with self.session.patch(f'{self.baseUrl}{url}', data=data, json=json, headers=headers) as res:
                 data = await res.text()
-                try: return JSON.loads(data)
+                try: return loads(data)
                 except: return data
         except ClientResponseError as e:
             raise EpException(e.status, e.message)
@@ -148,7 +130,7 @@ class AsyncRest:
         try:
             async with self.session.delete(f'{self.baseUrl}{url}', headers=headers) as res:
                 data = await res.text()
-                try: return JSON.loads(data)
+                try: return loads(data)
                 except: return data
         except ClientResponseError as e:
             raise EpException(e.status, e.message)

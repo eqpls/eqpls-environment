@@ -7,11 +7,10 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
-from fastapi import HTTPException
 
 
 #===============================================================================
-# Constant
+# Implement
 #===============================================================================
 class TimeString:
     # Seconds
@@ -45,9 +44,3 @@ class TimeString:
 
     @classmethod
     def str2int(cls, key): return cls.__getattribute__(cls, key)
-
-class EpException(HTTPException):
-
-    def __init__(self, status_code, message):
-        HTTPException.__init__(self, status_code, {'message':str(message)})
-        LOG.ERROR(f'{status_code}: {str(message)}')
