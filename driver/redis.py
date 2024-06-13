@@ -1,63 +1,78 @@
 # -*- coding: utf-8 -*-
 '''
-Created on 2024. 2. 8.
+Equal Plus
 @author: Hye-Churn Jang
 '''
 
 #===============================================================================
 # Import
 #===============================================================================
+import json
 import redis.asyncio as redis
-from pydantic import BaseModel, PrivateAttr
-from typing import Any
+from uuid import UUID
+from pydantic import BaseModel
 
 
 #===============================================================================
 # Implement
 #===============================================================================
-# @dataclass(config=ConfigDict(underscore_attrs_are_private=True))
-class Redis(BaseModel):
+class Redis:
     
-    hostname: str
-    hostport: int
-    database: int
-    
-    _conn_: Any = PrivateAttr()
-    
-    def pipeline(self): return self._conn_.pipeline(transaction=True)
-    
-    async def set(self, *argv, **kargs): return await self._conn_.set(*argv, **kargs)
-    
-    async def get(self, *argv, **kargs): return await self._conn_.get(*argv, **kargs)
-    
-    async def expire(self, *argv, **kargs): return await self._conn_.expire(*argv, **kargs)
-    
-    async def delete(self, *argv, **kargs): return await self._conn_.delete(*argv, **kargs)
-    
-    @classmethod
-    async def initialize(cls, config, database):
-        hostname = config['redis']['hostname']
-        hostport = int(config['redis']['hostport'])
-        database = int(database)
+    class Pipeline:
         
-        # logging
-        LOG.INFO('Init Redis')
-        LOG.INFO(LOG.KEYVAL('hostname', hostname))
-        LOG.INFO(LOG.KEYVAL('hostport', hostport))
-        LOG.INFO(LOG.KEYVAL('database', database))
+        def __init__(self, pipeline):
+            self._pipeline = pipeline
         
-        return await (cls(
-            hostname=hostname,
-            hostport=hostport,
-            database=database
-        )).connect()
+        def get(self, id:UUID):
+            self._pipeline.get(str(id))
+            return self
+        
+        def set(self, model:BaseModel):
+            self._pipeline.set(str(model.id), json.dumps(model.dict(), separators=(',', ':')))
+            return self
+        
+        def expire(self, id:UUID, seconds:int):
+            self._pipeline.expire(str(id), seconds)
+            return self
+        
+        def delete(self, id:UUID):
+            self._pipeline.delete(str(id))
+            return self
+        
+        async def execute(self):
+            return await self._pipeline.execute()
     
-    async def connect(self):
-        try:
-            self._conn_ = redis.Redis(host=self.hostname, port=self.hostport, db=self.database)
-            LOG.INFO(f'Redis Connected [{self.hostname}:{self.hostport}/{self.database}]')
-        except Exception as e:
-            LOG.INFO(f'Redis Disconnected [{self.hostname}:{self.hostport}/{self.database}]')
-            raise e
-        return self
+    def __init__(self, config):
+        self._redisHostname = config['redis']['hostname']
+        self._redisHostport = int(config['redis']['hostport'])
+        self._redisUsername = config['redis']['username']
+        self._redisPassword = config['redis']['password']
+        self._redisLastIndex = 1
+        self._redisModelMap = {}
+    
+    async def createDatabase(self, schema:BaseModel):
+        path = f'{schema.__module__}.{schema.__name__}' 
+        self._redisModelMap[path] = redis.Redis(host=self._redisHostname, port=self._redisHostport, db=self._redisLastIndex)
+        LOG.INFO(f'create database on redis: {path} [{self._redisLastIndex}]')
+        self._redisLastIndex += 1
+    
+    def pipeline(self, schema:BaseModel):
+        conn = self._redisModelMap[f'{schema.__module__}.{schema.__name__}']
+        return Redis.Pipeline(conn.pipeline(transaction=True))
+    
+    async def get(self, schema:BaseModel, id:UUID):
+        conn = self._redisModelMap[f'{schema.__module__}.{schema.__name__}']
+        return schema(**json.loads(await conn.get(str(id))))
+    
+    async def set(self, model:BaseModel):
+        conn = self._redisModelMap[f'{model.__class__.__module__}.{model.__class__.__name__}']
+        return await conn.set(str(model.id), json.dumps(model.dict(), separators=(',', ':')))
+    
+    async def expire(self, schema:BaseModel, id:UUID, seconds:int):
+        conn = self._redisModelMap[f'{schema.__module__}.{schema.__name__}']
+        return await conn.expire(str(id), seconds)
+    
+    async def delete(self, schema:BaseModel, id:UUID):
+        conn = self._redisModelMap[f'{schema.__module__}.{schema.__name__}']
+        return await conn.delete(str(id))
     

@@ -8,7 +8,6 @@ Equal Plus
 # Import
 #===============================================================================
 import sys
-import asyncio
 import logging
 import datetime
 import configparser
