@@ -11,17 +11,16 @@ import inspect
 import datetime
 from uuid import UUID
 from pydantic import BaseModel
-from stringcase import snakecase 
-from elasticsearch import AsyncElasticsearch
+from stringcase import snakecase
+from elasticsearch import AsyncElasticsearch, helpers
 from elasticsearch_dsl import AsyncSearch
-from common import EpException
 
 
 #===============================================================================
 # Implement
 #===============================================================================
 class ElasticSearch:
-    
+
     def __init__(self, config):
         self._esHostname = config['elasticsearch']['hostname']
         self._esHostport = int(config['elasticsearch']['hostport'])
@@ -38,36 +37,30 @@ class ElasticSearch:
             datetime: {'type': 'date'},
             list: {'type': 'keyword'}
         }
+        self._esIndexMap = {}
         self._es = AsyncElasticsearch(
             f'https://{self._esHostname}:{self._esHostport}',
             basic_auth=(self._esUsername, self._esPassword),
             verify_certs=False,
             ssl_show_warn=False
         )
-            
-    async def createIndex(self, schema:BaseModel, shards:int=None, replicas:int=None):
-        
+
+    async def registerModel(self, schema:BaseModel, shards:int=None, replicas:int=None):
+
         def parseModelToMapping(schema):
             mapping = {}
             for field, fieldType in schema.__annotations__.items():
                 if fieldType in self._esTypeMap: esFieldType = self._esTypeMap[fieldType]
                 else:
-                    if inspect.isclass(fieldType) and issubclass(fieldType, BaseModel):  # sub-model
-                        esFieldType = {
-                            'properties': parseModelToMapping(fieldType)
-                        }
-                    else:  # list-field
+                    if inspect.isclass(fieldType) and issubclass(fieldType, BaseModel):
+                        esFieldType = {'properties': parseModelToMapping(fieldType)}
+                    else:
                         fieldType = fieldType.__args__[0]
                         if fieldType in self._esTypeMap: esFieldType = self._esTypeMap[fieldType]
-                        else:
-                            esFieldType = {
-                                'type': 'nested',
-                                'properties': parseModelToMapping(fieldType)
-                            }
+                        else: esFieldType = {'type': 'nested', 'properties': parseModelToMapping(fieldType)}
                 mapping[field] = esFieldType
             return mapping
-        
-        
+
         index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
         if not await self._es.indices.exists(index=index):
             await self._es.indices.create(index=index, body={
@@ -79,30 +72,41 @@ class ElasticSearch:
                     'properties': parseModelToMapping(schema)
                 }
             })
-            LOG.INFO(f'create index: {index}')
-    
-    async def createDocument(self, model:BaseModel):
-        index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
-        try:
-            await self._es.index(index=index, id=model.id, body=model.dict())
-            return model
-        except: raise EpException(400, 'Bad Request')
+        self._esIndexMap[schema] = index
+        LOG.INFO(f'search.register({schema}) <{index}>')
 
-    async def readDocument(self, schema:BaseModel, id:UUID):
-        index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
+    async def readDocument(self, schema:BaseModel, id:str):
         try:
-            result = (await self._es.get(index=index, id=str(id))).body['_source']
-            return schema(**result)
-        except: raise EpException(404, 'Not Found')
-    
-    async def searchDocuments(self, schema:BaseModel, **query):
-        index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
+            model = (await self._es.get(index=self._esIndexMap[schema], id=id)).body['_source']
+            LOG.DEBUG(f'search.read({schema}) {model}')
+        except: model = None
+        return model
+
+    async def searchDocuments(self, schema:BaseModel, query:dict):
+        search = AsyncSearch(using=self._es, index=self._esIndexMap[schema])
+        for key, val in query.items():
+            op = key[-1]
+            if op in ['+', '!']: search = search.filter('match', **{key[:-1]: val}) if op == '+' else search.exclude('match', **{key[:-1]: val})
+            else: search = search.query('match', **{key: val})
+        models = [hit.to_dict() for hit in await search.execute()]
+        if models: LOG.DEBUG(f'search.search({schema}) {models}')
+        return models
+
+    async def createDocument(self, schema:BaseModel, *models):
+        if models:
+            index = self._esIndexMap[schema]
+            docs = []
+            for model in models:
+                docs.append({
+                    '_index': index,
+                    '_id': model['id'],
+                    '_source': model
+                })
+            await helpers.async_bulk(self._es, docs)
+            LOG.DEBUG(f'search.create({schema}) {models}')
+
+    async def deleteDocument(self, schema:BaseModel, id:str):
         try:
-            search = AsyncSearch(using=self._es, index=index)
-            for key, val in query.items():
-                op = key[-1]
-                if op in ['+', '!']: search = search.filter('match', **{key[:-1]: val}) if op == '+' else search.exclude('match', **{key[:-1]: val})
-                else: search = search.query('match', **{key: val})
-            return [schema(**hit.to_dict()) for hit in await search.execute()]
-        except: raise EpException(400, 'Bad Request')
-    
+            await self._es.delete(index=self._esIndexMap[schema], id=id)
+            LOG.DEBUG(f'search.delete({schema}) {id}')
+        except: pass

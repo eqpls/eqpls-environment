@@ -11,7 +11,7 @@ import time
 import json
 from uuid import UUID, uuid4
 from typing import List, Union, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 
 
 #===============================================================================
@@ -23,6 +23,9 @@ class ID:
     def setID(self, id:Optional[UUID]=None):
         self.id = id if id else uuid4()
         return self
+
+    @field_serializer('id')
+    def __uuid_to_str__(self, id:UUID): return str(id)
 
 
 class Profile:
@@ -39,24 +42,24 @@ class Profile:
 
 class Tags:
     # tags:list = []
-    
+
     def setTag(self, tag):
         if tag not in self.tags: self.tags.append(tag)
         return self
-    
+
     def delTag(self, tag):
         if tag in self.tags: self.tags.pop(tag)
         return self
-        
+
 
 class Metadata:
     # metadata:str = '{}'
-    
+
     def getMeta(self, key):
         metadata = self.getMetadata()
         if key in metadata: return metadata[key]
         else: None
-    
+
     def setMeta(self, key, value):
         metadata = self.getMetadata()
         if key in metadata:
