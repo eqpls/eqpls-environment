@@ -10,38 +10,51 @@ Equal Plus
 import time
 import json
 from uuid import UUID, uuid4
-from typing import List, Union, Optional
-from pydantic import BaseModel, field_serializer
+from typing import Annotated
+from pydantic import BaseModel, PlainSerializer
+
+#===============================================================================
+# Fields
+#===============================================================================
+ID = Annotated[UUID, PlainSerializer(lambda x: str(x), return_type=str)]
+Key = Annotated[str, 'keyword']
 
 
 #===============================================================================
-# Interface
+# General Input & Output Form
 #===============================================================================
-class ID:
-    # id:UUID = ''
+class ModelFilter(BaseModel):
+    query:str | None
+    orderBy:str | None
+    order:str | None
+    size:int | None
+    skip:int | None
 
-    def setID(self, id:Optional[UUID]=None):
+
+class ModelStatus(BaseModel):
+    id:ID = ''
+    status:str = ''
+
+
+#===============================================================================
+# Abstract Models
+#===============================================================================
+class Ident:
+    id:ID = ''
+
+    def setID(self, id:ID | None=None):
         self.id = id if id else uuid4()
         return self
 
-    @field_serializer('id')
-    def __uuid_to_str__(self, id:UUID): return str(id)
-
 
 class Profile:
-    # name:str = ''
-    # displayName:str = ''
-    # description:str = ''
-
-    def setProfile(self, name:str, displayName:str='', description:str=''):
-        self.name = name
-        self.displayName = displayName
-        self.description = description
-        return self
+    name:Key = ''
+    displayName:str = ''
+    description:str = ''
 
 
 class Tags:
-    # tags:list = []
+    tags:list[str] = []
 
     def setTag(self, tag):
         if tag not in self.tags: self.tags.append(tag)
@@ -53,7 +66,7 @@ class Tags:
 
 
 class Metadata:
-    # metadata:str = '{}'
+    metadata:str = '{}'
 
     def getMeta(self, key):
         metadata = self.getMetadata()
@@ -80,13 +93,8 @@ class Metadata:
 
 
 class TStamp:
-    # tstamp:int = 0
+    tstamp:int = 0
 
     def setTStamp(self):
         self.tstamp = int(time.time())
         return self
-
-
-class ModelStatus(BaseModel):
-    id:UUID = ''
-    status:str = ''

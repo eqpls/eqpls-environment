@@ -13,7 +13,9 @@ from uuid import UUID
 from pydantic import BaseModel
 from stringcase import snakecase
 from elasticsearch import AsyncElasticsearch, helpers
-from elasticsearch_dsl import AsyncSearch
+from luqum.parser import parser
+from luqum.elasticsearch import ElasticsearchQueryBuilder, SchemaAnalyzer
+from common import EpException, ModelFilter
 
 
 #===============================================================================
@@ -28,16 +30,8 @@ class ElasticSearch:
         self._esPassword = config['elasticsearch']['password']
         self._esShards = int(config['elasticsearch']['shards'])
         self._esReplicas = int(config['elasticsearch']['replicas'])
-        self._esTypeMap = {
-            str: {'type': 'text'},
-            int: {'type': 'long'},
-            float: {'type': 'double'},
-            bool: {'type': 'boolean'},
-            UUID: {'type': 'keyword'},
-            datetime: {'type': 'date'},
-            list: {'type': 'keyword'}
-        }
         self._esIndexMap = {}
+        self._esQueryMap = {}
         self._es = AsyncElasticsearch(
             f'https://{self._esHostname}:{self._esHostport}',
             basic_auth=(self._esUsername, self._esPassword),
@@ -48,31 +42,60 @@ class ElasticSearch:
     async def registerModel(self, schema:BaseModel, shards:int=None, replicas:int=None):
 
         def parseModelToMapping(schema):
+            
+            def parseTermToMapping(fieldType, fieldMeta):
+                if fieldType == str:
+                    if 'keyword' in fieldMeta: return {'type': 'keyword'}
+                    else: return {'type': 'text'}
+                elif fieldType == int: return {'type': 'long'}
+                elif fieldType == float: return {'type': 'double'}
+                elif fieldType == bool: return {'type': 'boolean'}
+                elif fieldType == UUID: return {'type': 'keyword'}
+                elif fieldType == datetime: return {'type': 'date'}
+                return None
+            
+            def parseTermsToMapping(fieldType):
+                if fieldType == str: return {'type': 'keyword'}
+                elif fieldType == int: return {'type': 'long'}
+                elif fieldType == float: return {'type': 'double'}
+                elif fieldType == bool: return {'type': 'boolean'}
+                elif fieldType == UUID: return {'type': 'keyword'}
+                elif fieldType == datetime: return {'type': 'date'}
+                return None
+            
             mapping = {}
-            for field, fieldType in schema.__annotations__.items():
-                if fieldType in self._esTypeMap: esFieldType = self._esTypeMap[fieldType]
-                else:
+            for field in schema.model_fields.keys():
+                fieldData = schema.model_fields[field]
+                fieldType = fieldData.annotation
+                fieldMeta = fieldData.metadata
+                esFieldType = parseTermToMapping(fieldType, fieldMeta)
+                if not esFieldType:
                     if inspect.isclass(fieldType) and issubclass(fieldType, BaseModel):
                         esFieldType = {'properties': parseModelToMapping(fieldType)}
-                    else:
+                    elif getattr(fieldType, '__origin__', None) == list:
                         fieldType = fieldType.__args__[0]
-                        if fieldType in self._esTypeMap: esFieldType = self._esTypeMap[fieldType]
-                        else: esFieldType = {'type': 'nested', 'properties': parseModelToMapping(fieldType)}
+                        esFieldType = parseTermsToMapping(fieldType)
+                        if not esFieldType:
+                            esFieldType = {'type': 'nested', 'properties': parseModelToMapping(fieldType)}
+                    else: raise EpException(500, f'search.registerModel({schema}.{field}{fieldType}): could not parse schema') 
                 mapping[field] = esFieldType
             return mapping
 
         index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
+        indexSchema = {
+            'settings': {
+                'number_of_shards': shards if shards else self._esShards,
+                'number_of_replicas': replicas if replicas else self._esReplicas
+            },
+            'mappings': {
+                'properties': parseModelToMapping(schema)
+            }
+        }
         if not await self._es.indices.exists(index=index):
-            await self._es.indices.create(index=index, body={
-                'settings': {
-                    'number_of_shards': shards if shards else self._esShards,
-                    'number_of_replicas': replicas if replicas else self._esReplicas
-                },
-                'mappings': {
-                    'properties': parseModelToMapping(schema)
-                }
-            })
+            await self._es.indices.create(index=index, body=indexSchema)
+        self._esQueryMap[schema] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
         self._esIndexMap[schema] = index
+        
         LOG.INFO(f'search.register({schema}) <{index}>')
 
     async def readDocument(self, schema:BaseModel, id:str):
@@ -82,14 +105,13 @@ class ElasticSearch:
         except: model = None
         return model
 
-    async def searchDocuments(self, schema:BaseModel, query:dict):
-        search = AsyncSearch(using=self._es, index=self._esIndexMap[schema])
-        for key, val in query.items():
-            op = key[-1]
-            if op in ['+', '!']: search = search.filter('match', **{key[:-1]: val}) if op == '+' else search.exclude('match', **{key[:-1]: val})
-            else: search = search.query('match', **{key: val})
-        models = [hit.to_dict() for hit in await search.execute()]
-        if models: LOG.DEBUG(f'search.search({schema}) {models}')
+    async def searchDocuments(self, schema:BaseModel, filter:ModelFilter):
+        if filter.query: query = self._esQueryMap[schema](parser.parse(filter.query))
+        else: query = None
+        if filter.orderBy: sort = [{filter.orderBy: filter.order}]
+        else: sort = None
+        models = await self._es.search(index=self._esIndexMap[schema], query=query, sort=sort, from_=filter.skip, size=filter.size)
+        models = [model['_source'] for model in models['hits']['hits']]
         return models
 
     async def createDocument(self, schema:BaseModel, *models):

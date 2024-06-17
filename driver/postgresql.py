@@ -61,7 +61,7 @@ class Postgresql:
 
     async def registerModel(self, schema:BaseModel):
         table = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
-        fields = sorted(schema.__annotations__.keys())
+        fields = sorted(schema.model_fields.keys())
         snakes = [snakecase(field) for field in fields]
         self._psqlFieldNameMap[schema] = fields
         self._psqlSnakeNameMap[schema] = snakes
@@ -71,7 +71,7 @@ class Postgresql:
         dumpers = []
         loaders = []
         for field in fields:
-            fieldType = schema.__annotations__[field]
+            fieldType = schema.model_fields[field].annotation
             if fieldType == str:
                 columns.append(f'{snakes[index]} TEXT')
                 dumpers.append(self.__text_dumper__)
@@ -93,11 +93,15 @@ class Postgresql:
                 else: columns.append(f'{snakes[index]} TEXT')
                 dumpers.append(self.__text_dumper__)
                 loaders.append(self.__data_loader__)
-            elif (inspect.isclass(fieldType) and issubclass(fieldType, BaseModel)) or fieldType in [list, dict]:
+            elif (inspect.isclass(fieldType) and issubclass(fieldType, BaseModel)):
                 columns.append(f'{snakes[index]} TEXT')
                 dumpers.append(self.__json_dumper__)
                 loaders.append(self.__json_loader__)
-            elif getattr(fieldType, '__origin__', None) == list:
+            elif fieldType in [list, dict]:
+                columns.append(f'{snakes[index]} TEXT')
+                dumpers.append(self.__json_dumper__)
+                loaders.append(self.__json_loader__)
+            elif getattr(fieldType, '__origin__', None) in [list, dict]:
                 columns.append(f'{snakes[index]} TEXT')
                 dumpers.append(self.__json_dumper__)
                 loaders.append(self.__json_loader__)

@@ -12,7 +12,7 @@ from .exceptions import EpException
 from .utils import setEnvironment, getConfig, Logger
 from .interfaces import SyncRest, AsyncRest
 from .schedules import asleep, runBackground, MultiTask
-from .model import ID, Profile, Tags, Metadata, TStamp, ModelStatus
+from .model import ID, Key, ModelFilter, ModelStatus, Ident, Profile, Tags, Metadata, TStamp 
 
 
 #===============================================================================
