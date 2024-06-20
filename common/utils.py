@@ -18,6 +18,7 @@ import configparser
 #===============================================================================
 def setEnvironment(key, value):
     __builtins__[key] = value
+    return value
 
 
 def getConfig(path):
@@ -29,7 +30,7 @@ def getConfig(path):
 class Logger:
 
     @classmethod
-    def register(cls, config, name='uvicorn.default'): setEnvironment('LOG', Logger(config['default']['stage'], name))
+    def register(cls, config, name='uvicorn.default'): setEnvironment('LOG', Logger(config['service']['stage'], name))
 
     def __init__(self, stage, name):
         if name: self._logger = logging.getLogger(name=name)

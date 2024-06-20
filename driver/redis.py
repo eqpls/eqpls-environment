@@ -11,6 +11,8 @@ import json
 import redis.asyncio as redis
 from pydantic import BaseModel
 
+from common import SchemaDescription
+
 
 #===============================================================================
 # Implement
@@ -18,16 +20,16 @@ from pydantic import BaseModel
 class Redis:
 
     def __init__(self, config):
-        self._redisHostname = config['redis']['hostname']
-        self._redisHostport = int(config['redis']['hostport'])
-        self._redisUsername = config['redis']['username']
-        self._redisPassword = config['redis']['password']
+        self._redisHostname = config['cache']['hostname']
+        self._redisHostport = int(config['cache']['hostport'])
+        self._redisUsername = config['cache']['username']
+        self._redisPassword = config['cache']['password']
+        self._redisLastIndex = int(config['redis']['start_db_index'])
         self._redisDefaultExpire = int(config['redis']['expire'])
-        self._redisLastIndex = 1
         self._redisModelMap = {}
         self._redisExpireMap = {}
 
-    async def registerModel(self, schema:BaseModel, expire:int=None):
+    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, expire:int=None):
         self._redisModelMap[schema] = await redis.Redis(
             host=self._redisHostname,
             port=self._redisHostport,
@@ -36,25 +38,32 @@ class Redis:
         )
         if expire: self._redisExpireMap[schema] = expire
         else: self._redisExpireMap[schema] = self._redisDefaultExpire
-        LOG.INFO(f'cache.register({schema}) <{self._redisLastIndex}>')
+        
+        # LOG.DEBUG(f'cache.register({schema}) <{self._redisLastIndex}>')
         self._redisLastIndex += 1
+    
+    async def close(self):
+        for conn in self._redisModelMap.values(): await conn.aclose()
 
-    async def get(self, schema:BaseModel, id:str):
+    async def read(self, schema:BaseModel, id:str):
         async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
             model = (await pipeline.get(id).expire(id, self._redisExpireMap[schema]).execute())[0]
-        if model:
-            model = json.loads(model)
-            LOG.DEBUG(f'cache.get({schema}) {model}')
+        if model: model = json.loads(model)
         return model
 
-    async def set(self, schema:BaseModel, *models):
+    async def create(self, schema:BaseModel, *models):
         if models:
             expire = self._redisExpireMap[schema]
             async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
                 for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
                 await pipeline.execute()
-            LOG.DEBUG(f'cache.set({schema}) {models}')
+    
+    async def update(self, schema:BaseModel, *models):
+        if models:
+            expire = self._redisExpireMap[schema]
+            async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
+                for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
+                await pipeline.execute()
 
     async def delete(self, schema:BaseModel, id:str):
-        if await self._redisModelMap[schema].delete(id):
-            LOG.DEBUG(f'cache.del({schema}) {id}')
+        await self._redisModelMap[schema].delete(id)

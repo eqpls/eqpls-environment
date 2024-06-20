@@ -14,6 +14,7 @@ Equal Plus
 #===============================================================================
 class TimeString:
     # Seconds
+    SEC = 1
     S1 = 1
     S2 = 2
     S3 = 3
@@ -24,6 +25,7 @@ class TimeString:
     S30 = 30
     S60 = 60
     # Minutes
+    MIN = 60
     M1 = 60
     M2 = 120
     M3 = 180
@@ -34,13 +36,22 @@ class TimeString:
     M30 = 1800
     M60 = 3600
     # Hours
+    HOUR = 3600
     H1 = 3600
     H2 = 7200
     H3 = 10800
     H6 = 21600
     H8 = 28800
+    # Day
+    DAY = 86400
+    D1 = 86400
+    WEEK = 604800
+    W1 = 604800
     # Year
+    YEAR = 31536000
     Y1 = 31536000
 
     @classmethod
-    def str2int(cls, key): return cls.__getattribute__(cls, key)
+    def str2int(cls, key):
+        try: return cls.__getattribute__(cls, key)
+        except: return str(key)

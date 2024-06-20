@@ -11,11 +11,10 @@ import inspect
 import datetime
 from uuid import UUID
 from pydantic import BaseModel
-from stringcase import snakecase
 from elasticsearch import AsyncElasticsearch, helpers
-from luqum.parser import parser
 from luqum.elasticsearch import ElasticsearchQueryBuilder, SchemaAnalyzer
-from common import EpException, ModelFilter
+
+from common import EpException, SchemaDescription, SearchOption
 
 
 #===============================================================================
@@ -24,12 +23,13 @@ from common import EpException, ModelFilter
 class ElasticSearch:
 
     def __init__(self, config):
-        self._esHostname = config['elasticsearch']['hostname']
-        self._esHostport = int(config['elasticsearch']['hostport'])
-        self._esUsername = config['elasticsearch']['username']
-        self._esPassword = config['elasticsearch']['password']
+        self._esHostname = config['search']['hostname']
+        self._esHostport = int(config['search']['hostport'])
+        self._esUsername = config['search']['username']
+        self._esPassword = config['search']['password']
         self._esShards = int(config['elasticsearch']['shards'])
         self._esReplicas = int(config['elasticsearch']['replicas'])
+        self._esExpire = int(config['elasticsearch']['expire'])
         self._esIndexMap = {}
         self._esQueryMap = {}
         self._es = AsyncElasticsearch(
@@ -39,7 +39,7 @@ class ElasticSearch:
             ssl_show_warn=False
         )
 
-    async def registerModel(self, schema:BaseModel, shards:int=None, replicas:int=None):
+    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, shards:int=None, replicas:int=None, expire=None):
 
         def parseModelToMapping(schema):
             
@@ -81,7 +81,7 @@ class ElasticSearch:
                 mapping[field] = esFieldType
             return mapping
 
-        index = f'{snakecase(schema.__module__)}_{snakecase(schema.__name__)}'
+        index = desc.schemaPath
         indexSchema = {
             'settings': {
                 'number_of_shards': shards if shards else self._esShards,
@@ -96,39 +96,50 @@ class ElasticSearch:
         self._esQueryMap[schema] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
         self._esIndexMap[schema] = index
         
-        LOG.INFO(f'search.register({schema}) <{index}>')
+        # LOG.DEBUG(f'search.register({schema}) <{index}>')
 
-    async def readDocument(self, schema:BaseModel, id:str):
-        try:
-            model = (await self._es.get(index=self._esIndexMap[schema], id=id)).body['_source']
-            LOG.DEBUG(f'search.read({schema}) {model}')
+    async def close(self):
+        await self._es.close()
+
+    async def read(self, schema:BaseModel, id:str):
+        try: model = (await self._es.get(index=self._esIndexMap[schema], id=id)).body['_source']
         except: model = None
         return model
 
-    async def searchDocuments(self, schema:BaseModel, filter:ModelFilter):
-        if filter.query: query = self._esQueryMap[schema](parser.parse(filter.query))
-        else: query = None
-        if filter.orderBy: sort = [{filter.orderBy: filter.order}]
+    async def search(self, schema:BaseModel, option:SearchOption):
+        if option.filter: filter = self._esQueryMap[schema](option.filter)
+        else: filter = None
+        if option.orderBy and option.order: sort = [{option.orderBy: option.order}]
         else: sort = None
-        models = await self._es.search(index=self._esIndexMap[schema], query=query, sort=sort, from_=filter.skip, size=filter.size)
-        models = [model['_source'] for model in models['hits']['hits']]
-        return models
+        models = await self._es.search(index=self._esIndexMap[schema], source_includes=option.fields, query=filter, sort=sort, from_=option.skip, size=option.size)
+        return [model['_source'] for model in models['hits']['hits']]
+    
+    async def count(self, schema:BaseModel, option:SearchOption):
+        if option.filter: filter = self._esQueryMap[schema](option.filter)
+        else: filter = None
+        return (await self._es.count(index=self._esIndexMap[schema], query=filter))['count']
+    
+    async def __generate_bulk_data__(self, index, models):
+        for model in models:
+            model['_ttl'] = 1234
+            yield {
+                '_op_type': 'update',
+                '_index': index,
+                '_id': model['id'],
+                # '_cache_tstamp': FIX
+                'doc': model,
+                'doc_as_upsert': True
+            }
 
-    async def createDocument(self, schema:BaseModel, *models):
+    async def create(self, schema:BaseModel, *models):
         if models:
             index = self._esIndexMap[schema]
-            docs = []
-            for model in models:
-                docs.append({
-                    '_index': index,
-                    '_id': model['id'],
-                    '_source': model
-                })
-            await helpers.async_bulk(self._es, docs)
-            LOG.DEBUG(f'search.create({schema}) {models}')
+            await helpers.async_bulk(self._es, self.__generate_bulk_data__(index, models))
+    
+    async def update(self, schema:BaseModel, *models):
+        if models:
+            index = self._esIndexMap[schema]
+            await helpers.async_bulk(self._es, self.__generate_bulk_data__(index, models))
 
-    async def deleteDocument(self, schema:BaseModel, id:str):
-        try:
-            await self._es.delete(index=self._esIndexMap[schema], id=id)
-            LOG.DEBUG(f'search.delete({schema}) {id}')
-        except: pass
+    async def delete(self, schema:BaseModel, id:str):
+        await self._es.delete(index=self._esIndexMap[schema], id=id)

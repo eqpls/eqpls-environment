@@ -10,8 +10,9 @@ Equal Plus
 import time
 import json
 from uuid import UUID, uuid4
-from typing import Annotated
+from typing import Annotated, List, Any
 from pydantic import BaseModel, PlainSerializer
+from stringcase import snakecase, camelcase, pathcase, titlecase
 
 #===============================================================================
 # Fields
@@ -21,14 +22,72 @@ Key = Annotated[str, 'keyword']
 
 
 #===============================================================================
-# General Input & Output Form
+# Internal Models
 #===============================================================================
-class ModelFilter(BaseModel):
-    query:str | None
-    orderBy:str | None
-    order:str | None
-    size:int | None
-    skip:int | None
+class SchemaDescription:
+    
+    def __init__(self, title:str, version:int, schema:Any):
+        self.title = title
+        self.version = version
+        self.schema = schema
+    
+    @property
+    def nameCode(self): return self.schema.__name__
+    
+    @property
+    def nameSnake(self): return snakecase(self.schema.__name__)
+    
+    @property
+    def nameCamel(self): return camelcase(self.schema.__name__)
+    
+    @property
+    def moduleCode(self): return self.schema.__module__
+    
+    @property
+    def modelCode(self): return f'{self.moduleCode}.{self.nameCode}'
+    
+    @property
+    def moduleReference(self): return self.moduleCode.replace('schema.', '')
+    
+    @property
+    def modelReference(self): return f'{snakecase(self.title)}.v{self.version}.{self.moduleReference}.{self.nameSnake}'
+    
+    @property
+    def schemaPath(self): return snakecase(f'{self.title}.v{self.version}.{self.moduleReference}.{self.nameCamel}')
+    
+    @property
+    def modelPath(self): return f'{self.moduleReference}.{self.nameCode}'
+    
+    @property
+    def url(self): return f'/{pathcase(self.modelReference)}'
+    
+    @property
+    def tags(self): return [titlecase(self.moduleReference)]
+    
+    # @property
+    # def url(self): return f'/{self.apiPath}/{self.nameSnake}'
+
+    
+class SearchOption:
+    
+    def __init__(
+        self,
+        fields:List[str] | None=None,
+        filter:Any | None=None,
+        query:dict | None=None,
+        orderBy:str | None=None,
+        order:str | None=None,
+        size:int | None=None,
+        skip:int | None=None,
+    ):
+        if fields: self.fields = ['id', 'ref'] + fields
+        else: self.fields = None
+        self.filter = filter
+        self.query = query
+        self.orderBy = orderBy
+        self.order = order
+        self.size = size
+        self.skip = skip
 
 
 class ModelStatus(BaseModel):
@@ -36,24 +95,57 @@ class ModelStatus(BaseModel):
     status:str = ''
 
 
+class ModelCount(BaseModel):
+    path:str = ''
+    value:int = 0
+
+
+#===============================================================================
+# Relation Models
+#===============================================================================
+class Reference(BaseModel):
+    id:ID = ''
+    type:Key = ''
+    ref:Key = ''
+
+
 #===============================================================================
 # Abstract Models
 #===============================================================================
-class Ident:
+class IdentSchema:
     id:ID = ''
+    type:Key = ''
+    ref:Key = ''
 
-    def setID(self, id:ID | None=None):
-        self.id = id if id else uuid4()
+    def setID(self, path:str, type:str, id:ID | None=None):
+        self.id = id if id else str(uuid4())
+        self.type = type
+        self.ref = f'{path}/{self.id}'
         return self
 
 
-class Profile:
+class StatusSchema:
+    author:Key = ''
+    deleted:bool = False
+    tstamp:int = 0
+    
+    def updateStatus(self, author=None):
+        self.author = author if author else 'unknown'
+        self.deleted = False
+        self.tstamp = int(time.time())
+        return self
+
+
+class BaseSchema(StatusSchema, IdentSchema): pass
+    
+
+class ProfSchema:
     name:Key = ''
     displayName:str = ''
     description:str = ''
 
 
-class Tags:
+class TagSchema:
     tags:list[str] = []
 
     def setTag(self, tag):
@@ -65,7 +157,7 @@ class Tags:
         return self
 
 
-class Metadata:
+class MetaSchema:
     metadata:str = '{}'
 
     def getMeta(self, key):
@@ -91,10 +183,3 @@ class Metadata:
         self.metadata = json.dumps(metadata, separators=(',', ':'))
         return self
 
-
-class TStamp:
-    tstamp:int = 0
-
-    def setTStamp(self):
-        self.tstamp = int(time.time())
-        return self
