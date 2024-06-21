@@ -15,7 +15,8 @@ from stringcase import snakecase
 from psycopg import AsyncConnection
 from luqum.tree import Item, Term, SearchField, Group, FieldGroup, Range, From, To, AndOperation, OrOperation, Not, UnknownOperation
 
-from common import asleep, runBackground, EpException, SchemaDescription, SearchOption
+from common import asleep, runBackground, EpException
+from common.controls import SchemaDescription, SearchOption
 
 #===============================================================================
 # SingleTon
@@ -89,15 +90,12 @@ class Postgresql:
     
     def __parseLuceneToTsquery__(self, node:Item):
         nodeType = type(node)
-        
-        print(nodeType, node.__dict__)
-        
         if isinstance(node, Term):
             terms = filter(None, str(node.value).strip('"').lower().split(' '))
             return f"{'|'.join(terms)}"
         elif nodeType == SearchField:
-            if '.' in node.name: fieldName = node.name.split('.')[0]
-            else: fieldName = node.name
+            if '.' in node.name: fieldName = snakecase(node.name.split('.')[0])
+            else: fieldName = snakecase(node.name)
             exprType = type(node.expr)
             if exprType in [Range, From, To]:
                 if exprType == Range: return f'{fieldName} >= {node.expr.low} AND {fieldName} <= {node.expr.high}'
@@ -168,7 +166,7 @@ class Postgresql:
     def __data_loader__(self, d): return d
 
     async def registerModel(self, schema:BaseModel, desc:SchemaDescription, expire=None):
-        table = desc.schemaPath
+        table = desc.category
         fields = sorted(schema.model_fields.keys())
         snakes = [snakecase(field) for field in fields]
         self._psqlFieldNameMap[schema] = fields

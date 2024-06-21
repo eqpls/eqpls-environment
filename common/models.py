@@ -7,12 +7,11 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
-import time
 import json
+from time import time as tstamp
 from uuid import UUID, uuid4
-from typing import Annotated, List, Any
+from typing import Annotated
 from pydantic import BaseModel, PlainSerializer
-from stringcase import snakecase, camelcase, pathcase, titlecase
 
 #===============================================================================
 # Fields
@@ -22,82 +21,19 @@ Key = Annotated[str, 'keyword']
 
 
 #===============================================================================
-# Internal Models
+# Pre Defined Models
 #===============================================================================
-class SchemaDescription:
-    
-    def __init__(self, title:str, version:int, schema:Any):
-        self.title = title
-        self.version = version
-        self.schema = schema
-    
-    @property
-    def nameCode(self): return self.schema.__name__
-    
-    @property
-    def nameSnake(self): return snakecase(self.schema.__name__)
-    
-    @property
-    def nameCamel(self): return camelcase(self.schema.__name__)
-    
-    @property
-    def moduleCode(self): return self.schema.__module__
-    
-    @property
-    def modelCode(self): return f'{self.moduleCode}.{self.nameCode}'
-    
-    @property
-    def moduleReference(self): return self.moduleCode.replace('schema.', '')
-    
-    @property
-    def modelReference(self): return f'{snakecase(self.title)}.v{self.version}.{self.moduleReference}.{self.nameSnake}'
-    
-    @property
-    def schemaPath(self): return snakecase(f'{self.title}.v{self.version}.{self.moduleReference}.{self.nameCamel}')
-    
-    @property
-    def modelPath(self): return f'{self.moduleReference}.{self.nameCode}'
-    
-    @property
-    def url(self): return f'/{pathcase(self.modelReference)}'
-    
-    @property
-    def tags(self): return [titlecase(self.moduleReference)]
-    
-    # @property
-    # def url(self): return f'/{self.apiPath}/{self.nameSnake}'
-
-    
-class SearchOption:
-    
-    def __init__(
-        self,
-        fields:List[str] | None=None,
-        filter:Any | None=None,
-        query:dict | None=None,
-        orderBy:str | None=None,
-        order:str | None=None,
-        size:int | None=None,
-        skip:int | None=None,
-    ):
-        if fields: self.fields = ['id', 'ref'] + fields
-        else: self.fields = None
-        self.filter = filter
-        self.query = query
-        self.orderBy = orderBy
-        self.order = order
-        self.size = size
-        self.skip = skip
-
-
 class ModelStatus(BaseModel):
     id:ID = ''
+    type:Key = ''
+    ref:Key = ''
     status:str = ''
 
 
 class ModelCount(BaseModel):
     path:str = ''
-    value:int = 0
+    query:str = ''
+    result:int = 0
 
 
 #===============================================================================
@@ -125,14 +61,14 @@ class IdentSchema:
 
 
 class StatusSchema:
-    author:Key = ''
+    updateBy:Key = ''
     deleted:bool = False
     tstamp:int = 0
     
-    def updateStatus(self, author=None):
-        self.author = author if author else 'unknown'
+    def updateStatus(self, updateBy=None):
+        self.updateBy = updateBy if updateBy else 'unknown'
         self.deleted = False
-        self.tstamp = int(time.time())
+        self.tstamp = int(tstamp())
         return self
 
 

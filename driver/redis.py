@@ -11,7 +11,7 @@ import json
 import redis.asyncio as redis
 from pydantic import BaseModel
 
-from common import SchemaDescription
+from common.controls import SchemaDescription
 
 
 #===============================================================================
@@ -50,20 +50,18 @@ class Redis:
             model = (await pipeline.get(id).expire(id, self._redisExpireMap[schema]).execute())[0]
         if model: model = json.loads(model)
         return model
+    
+    async def __set_redis_data__(self, schema, models):
+        expire = self._redisExpireMap[schema]
+        async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
+            for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
+            await pipeline.execute()
 
     async def create(self, schema:BaseModel, *models):
-        if models:
-            expire = self._redisExpireMap[schema]
-            async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
-                for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
-                await pipeline.execute()
+        if models: await self.__set_redis_data__(schema, models)
     
     async def update(self, schema:BaseModel, *models):
-        if models:
-            expire = self._redisExpireMap[schema]
-            async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
-                for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
-                await pipeline.execute()
+        if models: await self.__set_redis_data__(schema, models)
 
     async def delete(self, schema:BaseModel, id:str):
         await self._redisModelMap[schema].delete(id)

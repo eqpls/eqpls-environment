@@ -10,11 +10,13 @@ Equal Plus
 import inspect
 import datetime
 from uuid import UUID
+from time import time as tstamp
 from pydantic import BaseModel
 from elasticsearch import AsyncElasticsearch, helpers
 from luqum.elasticsearch import ElasticsearchQueryBuilder, SchemaAnalyzer
 
-from common import EpException, SchemaDescription, SearchOption
+from common import EpException
+from common.controls import SchemaDescription, SearchOption
 
 
 #===============================================================================
@@ -32,6 +34,7 @@ class ElasticSearch:
         self._esExpire = int(config['elasticsearch']['expire'])
         self._esIndexMap = {}
         self._esQueryMap = {}
+        self._esExpireMap = {}
         self._es = AsyncElasticsearch(
             f'https://{self._esHostname}:{self._esHostport}',
             basic_auth=(self._esUsername, self._esPassword),
@@ -81,18 +84,22 @@ class ElasticSearch:
                 mapping[field] = esFieldType
             return mapping
 
-        index = desc.schemaPath
+        index = desc.category
+        mapping = parseModelToMapping(schema)
+        mapping['_expire'] = {'type': 'long'}
         indexSchema = {
             'settings': {
                 'number_of_shards': shards if shards else self._esShards,
                 'number_of_replicas': replicas if replicas else self._esReplicas
             },
             'mappings': {
-                'properties': parseModelToMapping(schema)
+                'properties': mapping
             }
         }
         if not await self._es.indices.exists(index=index):
             await self._es.indices.create(index=index, body=indexSchema)
+        if expire: self._esExpireMap[schema] = expire
+        else: self._esExpireMap[schema] = self._esExpire
         self._esQueryMap[schema] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
         self._esIndexMap[schema] = index
         
@@ -119,27 +126,27 @@ class ElasticSearch:
         else: filter = None
         return (await self._es.count(index=self._esIndexMap[schema], query=filter))['count']
     
-    async def __generate_bulk_data__(self, index, models):
+    def __set_search_expire__(self, model, expire):
+        model['_expire'] = expire
+        return model
+    
+    async def __generate_bulk_data__(self, schema, models):
+        index = self._esIndexMap[schema]
+        expire = int(tstamp()) + self._esExpireMap[schema]
         for model in models:
-            model['_ttl'] = 1234
             yield {
                 '_op_type': 'update',
                 '_index': index,
                 '_id': model['id'],
-                # '_cache_tstamp': FIX
-                'doc': model,
+                'doc': self.__set_search_expire__(model, expire),
                 'doc_as_upsert': True
             }
 
     async def create(self, schema:BaseModel, *models):
-        if models:
-            index = self._esIndexMap[schema]
-            await helpers.async_bulk(self._es, self.__generate_bulk_data__(index, models))
+        if models: await helpers.async_bulk(self._es, self.__generate_bulk_data__(schema, models))
     
     async def update(self, schema:BaseModel, *models):
-        if models:
-            index = self._esIndexMap[schema]
-            await helpers.async_bulk(self._es, self.__generate_bulk_data__(index, models))
+        if models: await helpers.async_bulk(self._es, self.__generate_bulk_data__(schema, models))
 
     async def delete(self, schema:BaseModel, id:str):
         await self._es.delete(index=self._esIndexMap[schema], id=id)
