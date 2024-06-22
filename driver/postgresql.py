@@ -17,31 +17,29 @@ from luqum.tree import Item, Term, SearchField, Group, FieldGroup, Range, From, 
 
 from common import asleep, runBackground, EpException
 from common.controls import SchemaDescription, SearchOption
-
-#===============================================================================
-# SingleTon
-#===============================================================================
+from common.drivers import ModelDriverBase
 
 
 #===============================================================================
 # Implement
 #===============================================================================
-class Postgresql:
-    
+class PostgreSql(ModelDriverBase):
+
     def __init__(self, config):
-        self._psqlWriterHostname = config['database']['writer_hostname']
-        self._psqlWriterHostport = int(config['database']['writer_hostport'])
-        self._psqlReaderHostname = config['database']['reader_hostname']
-        self._psqlReaderHostport = int(config['database']['reader_hostport'])
-        self._psqlUsername = config['database']['username']
-        self._psqlPassword = config['database']['password']
-        self._psqlDatabase = config['postgresql']['database']
-        self._psqlFieldIndexMap = {}
-        self._psqlFieldNameMap = {}
-        self._psqlSnakeNameMap = {}
-        self._psqlDumperMap = {}
-        self._psqlLoaderMap = {}
-        self._psqlTableMap = {}
+        ModelDriverBase.__init__(self, 'postgresql', config)
+        self._psqlWriterHostname = self.config['writer_hostname']
+        self._psqlWriterHostport = int(self.config['writer_hostport'])
+        self._psqlReaderHostname = self.config['reader_hostname']
+        self._psqlReaderHostport = int(self.config['reader_hostport'])
+        self._psqlUsername = self.config['username']
+        self._psqlPassword = self.config['password']
+        self._psqlDatabase = self.config['database']
+        self._psqlSchemaToFieldIndexMap = {}
+        self._psqlSchemaToFieldNameMap = {}
+        self._psqlSchemaToSnakeNameMap = {}
+        self._psqlSchemaToDumperMap = {}
+        self._psqlSchemaToLoaderMap = {}
+        self._psqlSchemaToTableMap = {}
         self._psqlWriter = None
         self._psqlReader = None
         self._psqlRestore = False
@@ -55,7 +53,7 @@ class Postgresql:
                 user=self._psqlUsername,
                 password=self._psqlPassword
             )
-        
+
         if not self._psqlReader:
             self._psqlReader = await AsyncConnection.connect(
                 host=self._psqlReaderHostname,
@@ -64,16 +62,15 @@ class Postgresql:
                 user=self._psqlUsername,
                 password=self._psqlPassword
             )
-    
+
     async def __restore__(self):
         if not self._psqlRestore:
             self._psqlResotre = True
             await runBackground(self.__restore_background__())
-    
+
     async def __restore_background__(self):
         while True:
             await asleep(1)
-            # LOG.DEBUG('try to restore database connection')
             if self._psqlWriter:
                 try: await self._psqlWriter.close()
                 except: pass
@@ -86,8 +83,7 @@ class Postgresql:
             except: continue
             break
         self._psqlRestore = False
-        # LOG.INFO('database connection is restored')
-    
+
     def __parseLuceneToTsquery__(self, node:Item):
         nodeType = type(node)
         if isinstance(node, Term):
@@ -169,8 +165,8 @@ class Postgresql:
         table = desc.category
         fields = sorted(schema.model_fields.keys())
         snakes = [snakecase(field) for field in fields]
-        self._psqlFieldNameMap[schema] = fields
-        self._psqlSnakeNameMap[schema] = snakes
+        self._psqlSchemaToFieldNameMap[schema] = fields
+        self._psqlSchemaToSnakeNameMap[schema] = snakes
 
         index = 0
         columns = []
@@ -222,26 +218,25 @@ class Postgresql:
                 indices[fields[index]] = index
             else: raise EpException(500, f'database.registerModel({schema}.{field}{fieldType}): could not parse schema')
             index += 1
-        self._psqlDumperMap[schema] = dumpers
-        self._psqlLoaderMap[schema] = loaders
-        self._psqlFieldIndexMap[schema] = indices
+        self._psqlSchemaToDumperMap[schema] = dumpers
+        self._psqlSchemaToLoaderMap[schema] = loaders
+        self._psqlSchemaToFieldIndexMap[schema] = indices
 
         try: await self.__connect__()
         except: exit(1)
         async with self._psqlWriter.cursor() as cursor:
             await cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({','.join(columns)});")
             await self._psqlWriter.commit()
-        self._psqlTableMap[schema] = table
-        # LOG.DEBUG(f'database.register({schema}) <{table}>')
-    
+        self._psqlSchemaToTableMap[schema] = table
+
     async def close(self):
         await self._psqlWriter.close()
         await self._psqlReader.close()
-    
+
     async def read(self, schema:BaseModel, id:str):
-        table = self._psqlTableMap[schema]
-        fields = self._psqlFieldNameMap[schema]
-        
+        table = self._psqlSchemaToTableMap[schema]
+        fields = self._psqlSchemaToFieldNameMap[schema]
+
         query = f"SELECT * FROM {table} WHERE id='{id}' AND deleted=FALSE LIMIT 1;"
         cursor = self._psqlReader.cursor()
         try:
@@ -252,9 +247,9 @@ class Postgresql:
             await self.__restore__()
             raise e
         await cursor.close()
-        
+
         if record:
-            loaders = self._psqlLoaderMap[schema]
+            loaders = self._psqlSchemaToLoaderMap[schema]
             index = 0
             model = {}
             for column in record:
@@ -264,10 +259,10 @@ class Postgresql:
         return None
 
     async def search(self, schema:BaseModel, option:SearchOption):
-        table = self._psqlTableMap[schema]
-        fields = self._psqlFieldNameMap[schema]
+        table = self._psqlSchemaToTableMap[schema]
+        fields = self._psqlSchemaToFieldNameMap[schema]
         unique = False
-        
+
         if option.fields:
             termFields = [field.split('.')[0] for field in option.fields]
             columns = ','.join([snakecase(field) for field in termFields])
@@ -293,9 +288,7 @@ class Postgresql:
             condition = f'{condition} LIMIT {option.size}'
         if option.skip: condition = f'{condition} OFFSET {option.skip}'
         query = f'SELECT {columns} FROM {table} WHERE deleted=FALSE{condition};'
-        
-        LOG.DEBUG(query)
-        
+
         cursor = self._psqlReader.cursor()
         try:
             await cursor.execute(query)
@@ -310,10 +303,10 @@ class Postgresql:
             raise e
         await cursor.close()
 
-        loaders = self._psqlLoaderMap[schema]
+        loaders = self._psqlSchemaToLoaderMap[schema]
         models = []
         if option.fields:
-            indices = self._psqlFieldIndexMap[schema]
+            indices = self._psqlSchemaToFieldIndexMap[schema]
             for record in records:
                 index = 0
                 model = {}
@@ -331,11 +324,11 @@ class Postgresql:
                     index += 1
                 models.append(model)
         return models
-    
+
     async def count(self, schema:BaseModel, option:SearchOption):
-        table = self._psqlTableMap[schema]
-        fields = self._psqlFieldNameMap[schema]
-        
+        table = self._psqlSchemaToTableMap[schema]
+        fields = self._psqlSchemaToFieldNameMap[schema]
+
         if option.query:
             query = option.query
             conditions = []
@@ -349,7 +342,7 @@ class Postgresql:
         condition = ' AND '.join(query + filter)
         if condition: condition = f' AND {condition}'
         query = f'SELECT COUNT(*) FROM {table} WHERE deleted=FALSE{condition};'
-        
+
         cursor = self._psqlReader.cursor()
         try:
             await cursor.execute(query)
@@ -363,9 +356,9 @@ class Postgresql:
 
     async def create(self, schema:BaseModel, *models):
         if models:
-            table = self._psqlTableMap[schema]
-            fields = self._psqlFieldNameMap[schema]
-            dumpers = self._psqlDumperMap[schema]
+            table = self._psqlSchemaToTableMap[schema]
+            fields = self._psqlSchemaToFieldNameMap[schema]
+            dumpers = self._psqlSchemaToDumperMap[schema]
             cursor = self._psqlWriter.cursor()
 
             try:
@@ -390,10 +383,10 @@ class Postgresql:
 
     async def update(self, schema:BaseModel, *models):
         if models:
-            table = self._psqlTableMap[schema]
-            fields = self._psqlFieldNameMap[schema]
-            snakes = self._psqlSnakeNameMap[schema]
-            dumpers = self._psqlDumperMap[schema]
+            table = self._psqlSchemaToTableMap[schema]
+            fields = self._psqlSchemaToFieldNameMap[schema]
+            snakes = self._psqlSchemaToSnakeNameMap[schema]
+            dumpers = self._psqlSchemaToDumperMap[schema]
             cursor = self._psqlWriter.cursor()
 
             try:
@@ -408,7 +401,7 @@ class Postgresql:
                     query = f"UPDATE {table} SET {','.join(values)} WHERE id='{id}' AND deleted=FALSE;"
                     await cursor.execute(query)
                     await cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE id='{id}' AND deleted=FALSE;")
-    
+
                 results = [bool(result) for result in await cursor.fetchall()]
                 await self._psqlWriter.commit()
             except Exception as e:
@@ -420,7 +413,7 @@ class Postgresql:
         return []
 
     async def delete(self, schema:BaseModel, id:str):
-        table = self._psqlTableMap[schema]
+        table = self._psqlSchemaToTableMap[schema]
         query = f"DELETE FROM {table} WHERE id='{id}';"
         cursor = self._psqlWriter.cursor()
         try:

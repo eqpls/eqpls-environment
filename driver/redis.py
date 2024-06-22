@@ -12,56 +12,56 @@ import redis.asyncio as redis
 from pydantic import BaseModel
 
 from common.controls import SchemaDescription
+from common.drivers import ModelDriverBase
 
 
 #===============================================================================
 # Implement
 #===============================================================================
-class Redis:
+class Redis(ModelDriverBase):
 
     def __init__(self, config):
-        self._redisHostname = config['cache']['hostname']
-        self._redisHostport = int(config['cache']['hostport'])
-        self._redisUsername = config['cache']['username']
-        self._redisPassword = config['cache']['password']
-        self._redisLastIndex = int(config['redis']['start_db_index'])
-        self._redisDefaultExpire = int(config['redis']['expire'])
-        self._redisModelMap = {}
-        self._redisExpireMap = {}
+        ModelDriverBase.__init__(self, 'redis', config)
+        self._redisHostname = self.config['hostname']
+        self._redisHostport = int(self.config['hostport'])
+        self._redisUsername = self.config['username']
+        self._redisPassword = self.config['password']
+        self._redisLastIndex = int(self.config['start_db_index'])
+        self._redisDefaultExpire = int(self.config['expire'])
+        self._redisSchemaToConnMap = {}
+        self._redisSchemaToExpireMap = {}
 
     async def registerModel(self, schema:BaseModel, desc:SchemaDescription, expire:int=None):
-        self._redisModelMap[schema] = await redis.Redis(
+        self._redisSchemaToConnMap[schema] = await redis.Redis(
             host=self._redisHostname,
             port=self._redisHostport,
             db=self._redisLastIndex,
             decode_responses=True
         )
-        if expire: self._redisExpireMap[schema] = expire
-        else: self._redisExpireMap[schema] = self._redisDefaultExpire
-        
-        # LOG.DEBUG(f'cache.register({schema}) <{self._redisLastIndex}>')
+        if expire: self._redisSchemaToExpireMap[schema] = expire
+        else: self._redisSchemaToExpireMap[schema] = self._redisDefaultExpire
         self._redisLastIndex += 1
-    
+
     async def close(self):
-        for conn in self._redisModelMap.values(): await conn.aclose()
+        for conn in self._redisSchemaToConnMap.values(): await conn.aclose()
 
     async def read(self, schema:BaseModel, id:str):
-        async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
-            model = (await pipeline.get(id).expire(id, self._redisExpireMap[schema]).execute())[0]
+        async with self._redisSchemaToConnMap[schema].pipeline(transaction=True) as pipeline:
+            model = (await pipeline.get(id).expire(id, self._redisSchemaToExpireMap[schema]).execute())[0]
         if model: model = json.loads(model)
         return model
-    
+
     async def __set_redis_data__(self, schema, models):
-        expire = self._redisExpireMap[schema]
-        async with self._redisModelMap[schema].pipeline(transaction=True) as pipeline:
+        expire = self._redisSchemaToExpireMap[schema]
+        async with self._redisSchemaToConnMap[schema].pipeline(transaction=True) as pipeline:
             for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
             await pipeline.execute()
 
     async def create(self, schema:BaseModel, *models):
         if models: await self.__set_redis_data__(schema, models)
-    
+
     async def update(self, schema:BaseModel, *models):
         if models: await self.__set_redis_data__(schema, models)
 
     async def delete(self, schema:BaseModel, id:str):
-        await self._redisModelMap[schema].delete(id)
+        await self._redisSchemaToConnMap[schema].delete(id)
