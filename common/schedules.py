@@ -8,6 +8,7 @@ Equal Plus
 # Import
 #===============================================================================
 import asyncio
+from fastapi.concurrency import run_in_threadpool
 
 
 #===============================================================================
@@ -19,6 +20,10 @@ async def asleep(delay):
 
 async def runBackground(coro):
     asyncio.create_task(coro)
+
+
+async def runSyncAsAsync(func, *args, **kargs):
+    return await run_in_threadpool(func, *args, **kargs)
 
 
 class MultiTask:
