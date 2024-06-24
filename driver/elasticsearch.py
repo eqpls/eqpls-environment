@@ -44,7 +44,10 @@ class ElasticSearch(ModelDriverBase):
             ssl_show_warn=False
         )
 
-    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, shards:int=None, replicas:int=None, expire=None):
+    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, *args, **kargs):
+        shards = kargs['shards'] if 'shards' in kargs else None
+        replicas = kargs['replicas'] if 'replicas' in kargs else None
+        expire = kargs['expire'] if 'expire' in kargs else None
 
         def parseModelToMapping(schema):
 

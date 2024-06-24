@@ -31,7 +31,9 @@ class Redis(ModelDriverBase):
         self._redisSchemaToConnMap = {}
         self._redisSchemaToExpireMap = {}
 
-    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, expire:int=None):
+    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, *args, **kargs):
+        expire = kargs['expire'] if 'expire' in kargs else None
+        
         self._redisSchemaToConnMap[schema] = await redis.Redis(
             host=self._redisHostname,
             port=self._redisHostport,

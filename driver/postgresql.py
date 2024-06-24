@@ -161,7 +161,7 @@ class PostgreSql(ModelDriverBase):
 
     def __data_loader__(self, d): return d
 
-    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, expire=None):
+    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, *args, **kargs):
         table = desc.category
         fields = sorted(schema.model_fields.keys())
         snakes = [snakecase(field) for field in fields]

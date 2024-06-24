@@ -166,7 +166,7 @@ class UerpControl(BaseControl):
         if self._uerpSearchDriver: await self._search.close()
         if self._uerpCacheDriver: await self._cache.close()
 
-    async def registerModel(self, schema:BaseModel, version, level='csd', crud:str='crud', cacheExpire:int=None, searchExpire:int=None):
+    async def registerModel(self, schema:BaseModel, version, level='csd', crud:str='crud', cacheOptions:dict={}, searchOptions:dict={}, databaseOptions:dict={}):
         desc = SchemaDescription(title=self._title, apiVersion=self._serviceVersion, subVersion=version, schema=schema)
 
         try: self._database = UERP_DATABASE
@@ -187,9 +187,9 @@ class UerpControl(BaseControl):
             else: cache = None
             self._cache = setEnvironment('UERP_CACHE', cache)
 
-        if 'd' in level and self._database: await self._database.registerModel(schema, desc)
-        if 's' in level and self._search: await self._search.registerModel(schema, desc, searchExpire)
-        if 'c' in level and self._cache: await self._cache.registerModel(schema, desc, cacheExpire)
+        if 'd' in level and self._database: await self._database.registerModel(schema, desc, **databaseOptions)
+        if 's' in level and self._search: await self._search.registerModel(schema, desc, **searchOptions)
+        if 'c' in level and self._cache: await self._cache.registerModel(schema, desc, **cacheOptions)
 
         self._uerpSchemaToDriverMap[schema] = SchemaDriver(database=self._database, search=self._search, cache=self._cache)
         self._uerpSchemaToSchemaTypeMap[schema] = desc.schemaType
