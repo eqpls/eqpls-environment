@@ -10,8 +10,111 @@ Equal Plus
 import json
 from time import time as tstamp
 from uuid import UUID, uuid4
-from typing import Annotated
-from pydantic import BaseModel, PlainSerializer
+from typing import Annotated, Callable, TypeVar, Any, List
+from pydantic import BaseModel, PlainSerializer, ConfigDict
+from stringcase import snakecase, pathcase, titlecase
+
+#===============================================================================
+# SchemaDecorator
+#===============================================================================
+_TypeT = TypeVar('_TypeT', bound=type)
+
+
+class LayerOpt(dict):
+
+    def __init__(self, **kargs): dict.__init__(self, **kargs)
+
+
+class SchemaInfo(BaseModel):
+
+    major:int
+    minor:int
+    name:str
+    module:str
+    sref:str
+    dref:str
+    path:str
+    tags:list[str]
+    crud:str
+    layer:str
+    cache:Any | None = None
+    cacheOption:Any | None = None
+    search:Any | None = None
+    searchOption:Any | None = None
+    database:Any | None = None
+    databaseOption:Any | None = None
+
+
+def SchemaConfig(
+        major:int,
+        minor:int,
+        crud:str='crud',
+        layer:str='csd',
+        cacheOption:Any | None=None,
+        searchOption:Any | None=None,
+        databaseOption:Any | None=None
+    ) -> Callable[[_TypeT], _TypeT]:
+
+    def inner(TypedDictClass: _TypeT, /) -> _TypeT:
+
+        if not issubclass(TypedDictClass, BaseSchema): raise Exception(f'{TypedDictClass} is not a BaseSchema')
+
+        name = TypedDictClass.__name__
+        module = TypedDictClass.__module__
+        modsrt = module.replace('schema.', '')
+        lowerModule = modsrt.lower()
+        sref = f'{modsrt}.{name}'
+        lowerSchemaRef = sref.lower()
+        dref = snakecase(f'{lowerSchemaRef}.{major}.{minor}')
+        path = '/' + pathcase(f'v{major}.{lowerSchemaRef}')
+        tags = [titlecase('.'.join(reversed(lowerModule.split('.'))))]
+
+        TypedDictClass.__pydantic_config__ = ConfigDict(
+            schemaInfo=SchemaInfo(
+                major=major,
+                minor=minor,
+                name=name,
+                module=module,
+                sref=sref,
+                dref=dref,
+                path=path,
+                tags=tags,
+                crud=crud,
+                layer=layer,
+                cacheOption=cacheOption if cacheOption else LayerOpt(),
+                searchOption=searchOption if searchOption else LayerOpt(),
+                databaseOption=databaseOption if databaseOption else LayerOpt()
+            )
+        )
+        return TypedDictClass
+
+    return inner
+
+
+#===============================================================================
+# Interface
+#===============================================================================
+class SearchOption:
+
+    def __init__(
+        self,
+        fields:List[str] | None=None,
+        filter:Any | None=None,
+        query:dict | None=None,
+        orderBy:str | None=None,
+        order:str | None=None,
+        size:int | None=None,
+        skip:int | None=None,
+    ):
+        if fields: self.fields = ['id', 'type', 'ref'] + fields
+        else: self.fields = None
+        self.filter = filter
+        self.query = query
+        self.orderBy = orderBy
+        self.order = order
+        self.size = size
+        self.skip = skip
+
 
 #===============================================================================
 # Fields
@@ -25,8 +128,6 @@ Key = Annotated[str, 'keyword']
 #===============================================================================
 class ModelStatus(BaseModel):
     id:ID = ''
-    type:Key = ''
-    ref:Key = ''
     status:str = ''
 
 
@@ -41,8 +142,8 @@ class ModelCount(BaseModel):
 #===============================================================================
 class Reference(BaseModel):
     id:ID = ''
-    type:Key = ''
-    ref:Key = ''
+    sref:Key = ''
+    uref:Key = ''
 
 
 #===============================================================================
@@ -50,13 +151,23 @@ class Reference(BaseModel):
 #===============================================================================
 class IdentSchema:
     id:ID = ''
-    type:Key = ''
-    ref:Key = ''
+    sref:Key = ''
+    uref:Key = ''
 
-    def setID(self, path:str, type:str, id:ID | None=None):
+    @classmethod
+    def getSchemaInfo(cls): return cls.__pydantic_config__['schemaInfo']
+
+    @property
+    def schemaInfo(self): return self.__class__.getSchemaInfo()
+
+    def getReference(self):
+        return Reference(id=self.id, sref=self.sref, uref=self.uref)
+
+    def setID(self, id:ID | None=None):
+        schemaInfo = self.schemaInfo
         self.id = id if id else str(uuid4())
-        self.type = type
-        self.ref = f'{path}/{self.id}'
+        self.sref = schemaInfo.sref
+        self.uref = f'{schemaInfo.path}/{self.id}'
         return self
 
 
@@ -64,7 +175,7 @@ class StatusSchema:
     updateBy:Key = ''
     deleted:bool = False
     tstamp:int = 0
-    
+
     def updateStatus(self, updateBy=None):
         self.updateBy = updateBy if updateBy else 'unknown'
         self.deleted = False
@@ -73,7 +184,7 @@ class StatusSchema:
 
 
 class BaseSchema(StatusSchema, IdentSchema): pass
-    
+
 
 class ProfSchema:
     name:Key = ''

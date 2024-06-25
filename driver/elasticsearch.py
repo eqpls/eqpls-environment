@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from elasticsearch import AsyncElasticsearch, helpers
 from luqum.elasticsearch import ElasticsearchQueryBuilder, SchemaAnalyzer
 
-from common import EpException
-from common.controls import SchemaDescription, SearchOption
+from common import EpException, BaseSchema
+from common.controls import SearchOption
 from common.drivers import ModelDriverBase
 
 
@@ -34,9 +34,6 @@ class ElasticSearch(ModelDriverBase):
         self._esShards = int(self.config['shards'])
         self._esReplicas = int(self.config['replicas'])
         self._esExpire = int(self.config['expire'])
-        self._esSchemaToIndexMap = {}
-        self._esSchemaToQueryMap = {}
-        self._esSchemaToExpireMap = {}
         self._es = AsyncElasticsearch(
             f'https://{self._esHostname}:{self._esHostport}',
             basic_auth=(self._esUsername, self._esPassword),
@@ -44,10 +41,12 @@ class ElasticSearch(ModelDriverBase):
             ssl_show_warn=False
         )
 
-    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, *args, **kargs):
-        shards = kargs['shards'] if 'shards' in kargs else None
-        replicas = kargs['replicas'] if 'replicas' in kargs else None
-        expire = kargs['expire'] if 'expire' in kargs else None
+    async def registerModel(self, schema:BaseSchema, *args, **kargs):
+        info = schema.getSchemaInfo()
+
+        if 'shards' not in info.searchOption or not info.searchOption['shards']: info.searchOption['shards'] = self._esShards
+        if 'replicas' not in info.searchOption or not info.searchOption['replicas']: info.searchOption['replicas'] = self._esReplicas
+        if 'expire' not in info.searchOption or not info.searchOption['expire']: info.searchOption['expire'] = self._esExpire
 
         def parseModelToMapping(schema):
 
@@ -89,67 +88,70 @@ class ElasticSearch(ModelDriverBase):
                 mapping[field] = esFieldType
             return mapping
 
-        index = desc.category
         mapping = parseModelToMapping(schema)
         mapping['_expire'] = {'type': 'long'}
         indexSchema = {
             'settings': {
-                'number_of_shards': shards if shards else self._esShards,
-                'number_of_replicas': replicas if replicas else self._esReplicas
+                'number_of_shards': info.searchOption['shards'],
+                'number_of_replicas': info.searchOption['replicas']
             },
             'mappings': {
                 'properties': mapping
             }
         }
-        if not await self._es.indices.exists(index=index):
-            await self._es.indices.create(index=index, body=indexSchema)
-        if expire: self._esSchemaToExpireMap[schema] = expire
-        else: self._esSchemaToExpireMap[schema] = self._esExpire
-        self._esSchemaToQueryMap[schema] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
-        self._esSchemaToIndexMap[schema] = index
+        if not await self._es.indices.exists(index=info.dref): await self._es.indices.create(index=info.dref, body=indexSchema)
+        info.searchOption['filter'] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
+
+        info.search = self
 
     async def close(self):
         await self._es.close()
 
-    async def read(self, schema:BaseModel, id:str):
-        try: model = (await self._es.get(index=self._esSchemaToIndexMap[schema], id=id)).body['_source']
+    async def read(self, schema:BaseSchema, id:str):
+        try: model = (await self._es.get(index=schema.getSchemaInfo().dref, id=id)).body['_source']
         except: model = None
         return model
 
-    async def search(self, schema:BaseModel, option:SearchOption):
-        if option.filter: filter = self._esSchemaToQueryMap[schema](option.filter)
+    async def search(self, schema:BaseSchema, option:SearchOption):
+        info = schema.getSchemaInfo()
+        if option.filter: filter = info.searchOption['filter'](option.filter)
         else: filter = None
+
+        query = filter
+        if not query: query = {'match_all' : {}}
         if option.orderBy and option.order: sort = [{option.orderBy: option.order}]
         else: sort = None
-        models = await self._es.search(index=self._esSchemaToIndexMap[schema], source_includes=option.fields, query=filter, sort=sort, from_=option.skip, size=option.size)
+
+        models = await self._es.search(index=info.dref, source_includes=option.fields, query=filter, sort=sort, from_=option.skip, size=option.size)
         return [model['_source'] for model in models['hits']['hits']]
 
-    async def count(self, schema:BaseModel, option:SearchOption):
-        if option.filter: filter = self._esSchemaToQueryMap[schema](option.filter)
+    async def count(self, schema:BaseSchema, option:SearchOption):
+        info = schema.getSchemaInfo()
+        if option.filter: filter = info.searchOption['filter'](option.filter)
         else: filter = None
-        return (await self._es.count(index=self._esSchemaToIndexMap[schema], query=filter))['count']
+        return (await self._es.count(index=info.dref, query=filter))['count']
 
     def __set_search_expire__(self, model, expire):
-        model['_expire'] = expire
+        model['expireAt'] = expire
         return model
 
-    async def __generate_bulk_data__(self, schema, models):
-        index = self._esSchemaToIndexMap[schema]
-        expire = int(tstamp()) + self._esSchemaToExpireMap[schema]
+    async def __generate_bulk_data__(self, schema:BaseSchema, models):
+        info = schema.getSchemaInfo()
+        expire = int(tstamp()) + info.searchOption['expire']
         for model in models:
             yield {
                 '_op_type': 'update',
-                '_index': index,
+                '_index': info.dref,
                 '_id': model['id'],
                 'doc': self.__set_search_expire__(model, expire),
                 'doc_as_upsert': True
             }
 
-    async def create(self, schema:BaseModel, *models):
+    async def create(self, schema:BaseSchema, *models):
         if models: await helpers.async_bulk(self._es, self.__generate_bulk_data__(schema, models))
 
-    async def update(self, schema:BaseModel, *models):
+    async def update(self, schema:BaseSchema, *models):
         if models: await helpers.async_bulk(self._es, self.__generate_bulk_data__(schema, models))
 
-    async def delete(self, schema:BaseModel, id:str):
-        await self._es.delete(index=self._esSchemaToIndexMap[schema], id=id)
+    async def delete(self, schema:BaseSchema, id:str):
+        await self._es.delete(index=schema.getSchemaInfo().dref, id=id)

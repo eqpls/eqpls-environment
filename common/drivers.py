@@ -8,7 +8,6 @@ Equal Plus
 # Import
 #===============================================================================
 from pydantic import BaseModel
-from .controls import SchemaDescription
 
 
 #===============================================================================
@@ -25,7 +24,7 @@ class ModelDriverBase(DriverBase):
 
     def __init__(self, name, config): DriverBase.__init__(self, name, config)
 
-    async def registerModel(self, schema:BaseModel, desc:SchemaDescription, *args, **kargs): pass
+    async def registerModel(self, schema:BaseModel, *args, **kargs): pass
 
     async def close(self): pass
 
