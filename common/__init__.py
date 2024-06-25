@@ -8,7 +8,7 @@ Equal Plus
 # Import
 #===============================================================================
 from .constants import TimeString
-from .controls import BaseControl, UerpControl
+from .controls import BaseControl, MeshControl, UerpControl
 from .exceptions import EpException
 from .interfaces import SyncRest, AsyncRest
 from .models import SchemaConfig, LayerOpt

@@ -61,6 +61,19 @@ class BaseControl:
         asleep(1)
 
 
+class MeshControl(BaseControl):
+
+    def __init__(self, api, config, background:bool=False):
+        BaseControl.__init__(self, api, config, background)
+        if 'providers' not in self.config: raise Exception('[providers] configuration is not in module.conf')
+        self.providers = self.config['providers']
+
+    def registerModel(self, schema:BaseSchema, service):
+        if service not in self.providers: raise Exception(f'{service} is not in [providers] configuration')
+        schema.setSchemaInfo(self.version, service, self.providers[service])
+        return self
+
+
 class UerpControl(BaseControl):
 
     def __init__(self, api, config, background:bool=False, cacheDriver:Any=None, searchDriver:Any=None, databaseDriver:Any=None):
@@ -79,6 +92,7 @@ class UerpControl(BaseControl):
         if self._uerpCacheDriver: await self._cache.close()
 
     async def registerModel(self, schema:BaseSchema):
+        schema.setSchemaInfo(self.version, self.title)
         info = schema.getSchemaInfo()
 
         try: self._database = UERP_DATABASE
@@ -103,7 +117,6 @@ class UerpControl(BaseControl):
         if 's' in info.layer and self._search: await self._search.registerModel(schema)
         if 'c' in info.layer and self._cache: await self._cache.registerModel(schema)
 
-        info.path = f'/{self._title}{info.path}'
         self._uerpPathToSchemaMap[info.path] = schema
 
         if 'c' in info.crud:
@@ -120,6 +133,8 @@ class UerpControl(BaseControl):
             self.__update_data__.__annotations__['model'] = BaseModel
         if 'd' in info.crud:
             self.api.add_api_route(methods=['DELETE'], path=info.path + '/{id}', endpoint=self.__delete_data__, response_model=ModelStatus, tags=info.tags, name=f'Delete {info.name}')
+
+        return self
 
     async def __read_data__(self, request:Request, background:BackgroundTasks, id:ID):
         id = str(id)
