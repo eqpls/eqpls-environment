@@ -237,24 +237,26 @@ class BaseSchema(StatusSchema, IdentSchema):
         skip:int | None=None,
         archive:Literal['true', 'false']=None
     ):
-        query = '&'.join([f'$f={field}' for field in fields])
-        filter += f'$filter={filter}' if filter else None
-        if filter: query += f'&{filter}' if query else f'{filter}'
+        if fields: query = '&'.join([f'$f={field}' for field in fields])
+        else: query = ''
+        filter = f'$filter={filter}' if filter else None
+        if filter: query = f'{query}&{filter}' if query else filter
         orderBy = f'$orderby={orderBy}' if orderBy else None
-        if orderBy: query += f'&{orderBy}' if query else f'{orderBy}'
+        if orderBy: query = f'{query}&{orderBy}' if query else orderBy
         order = f'$order={order}' if order else None
-        if order: query += f'&{order}' if query else f'{order}'
+        if order: query = f'{query}&{order}' if query else order
         size = f'$size={size}' if size else None
-        if size: query += f'&{size}' if query else f'{size}'
+        if size: query = f'{query}&{size}' if query else size
         skip = f'$skip={skip}' if skip else None
-        if skip: query += f'&{skip}' if query else f'{skip}'
+        if skip: query = f'{query}&{skip}' if query else skip
         archive = f'$archive={archive}' if archive else None
-        if archive: query += f'&{archive}' if query else f'{archive}'
+        if archive: query = f'{query}&{archive}' if query else f'{archive}'
         query = f'?{query}' if query else ''
 
         info = cls.getSchemaInfo()
         if 'r' in info.crud:
-            async with AsyncRest(info.provider) as rest: models = await rest.get(f'{info.path}{query}')
+            async with AsyncRest(info.provider) as rest:
+                models = await rest.get(f'{info.path}{query}')
             return [cls(**model) for model in models]
         else: raise EpException(405, 'Could Not Read Model')
 

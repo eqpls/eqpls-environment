@@ -68,7 +68,7 @@ class MeshControl(BaseControl):
         if 'providers' not in self.config: raise Exception('[providers] configuration is not in module.conf')
         self.providers = self.config['providers']
 
-    def registerModel(self, schema:BaseSchema, service):
+    async def registerModel(self, schema:BaseSchema, service):
         if service not in self.providers: raise Exception(f'{service} is not in [providers] configuration')
         schema.setSchemaInfo(self.version, service, self.providers[service])
         return self
