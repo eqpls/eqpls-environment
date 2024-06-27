@@ -47,7 +47,7 @@ class BaseControl:
         self.api.add_api_route(
             methods=['GET'],
             path=f'/{snakecase(self.title)}/_health',
-            endpoint=self.__health_check__, response_model=ServiceHealth, tags=['Service Health'], name='Health'
+            endpoint=self.__health__, response_model=ServiceHealth, tags=['Service Health'], name='Health'
         )
 
     async def __shutdown__(self):
