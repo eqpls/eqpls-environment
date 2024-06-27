@@ -18,7 +18,7 @@ from stringcase import snakecase
 from .exceptions import EpException
 from .utils import setEnvironment
 from .schedules import asleep, runBackground
-from .models import ModelStatus, ModelCount, ID, BaseSchema, SearchOption
+from .models import ServiceHealth, ModelStatus, ModelCount, ID, BaseSchema, SearchOption
 
 
 #===============================================================================
@@ -32,7 +32,6 @@ class BaseControl:
         self.api = api
         self.api.router.add_event_handler("startup", self.__startup__)
         self.api.router.add_event_handler("shutdown", self.__shutdown__)
-
         self._title = snakecase(config['default']['title'])
         self._serviceVersion = int(config['service']['version'])
 
@@ -45,6 +44,11 @@ class BaseControl:
     async def __startup__(self):
         await self.startup()
         if self._background: await runBackground(self.background())
+        self.api.add_api_route(
+            methods=['GET'],
+            path=f'/{snakecase(self.title)}/_health',
+            endpoint=self.__health_check__, response_model=ServiceHealth, tags=['Service Health'], name='Health'
+        )
 
     async def __shutdown__(self):
         await self.shutdown()
@@ -52,9 +56,13 @@ class BaseControl:
     async def __background__(self):
         while self._background: self.background()
 
+    async def __health__(self): pass
+
     async def startup(self): pass
 
     async def shutdown(self): pass
+
+    async def health(self) -> ServiceHealth: return ServiceHealth(title=self.title, status='OK')
 
     async def background(self):
         LOG.INFO('run background process')

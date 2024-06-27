@@ -53,6 +53,12 @@ Key = Annotated[str, 'keyword']
 #===============================================================================
 # Pre-Defined Models
 #===============================================================================
+class ServiceHealth(BaseModel):
+    title:str = ''
+    status:str = ''
+    detail:dict = {}
+
+
 class Reference(BaseModel):
     id:ID = ''
     sref:Key = ''
