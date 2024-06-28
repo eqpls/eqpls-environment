@@ -46,7 +46,7 @@ class BaseControl:
         if self._background: await runBackground(self.background())
         self.api.add_api_route(
             methods=['GET'],
-            path=f'/{snakecase(self.title)}/_health',
+            path=f'/{snakecase(self.title)}/health',
             endpoint=self.__health__,
             response_model=ServiceHealth,
             tags=['Service Health'],
@@ -59,13 +59,13 @@ class BaseControl:
     async def __background__(self):
         while self._background: self.background()
 
-    async def __health__(self): pass
+    async def __health__(self) -> ServiceHealth: return await self.health()
 
     async def startup(self): pass
 
     async def shutdown(self): pass
 
-    async def health(self) -> ServiceHealth: return ServiceHealth(title=self.title, status='OK')
+    async def health(self) -> ServiceHealth: return ServiceHealth(title=self.title, status='OK', healthy=True)
 
     async def background(self):
         LOG.INFO('run background process')

@@ -56,6 +56,7 @@ Key = Annotated[str, 'keyword']
 class ServiceHealth(BaseModel):
     title:str = ''
     status:str = ''
+    healthy:bool = False
     detail:dict = {}
 
 
