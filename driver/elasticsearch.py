@@ -89,7 +89,7 @@ class ElasticSearch(ModelDriverBase):
             return mapping
 
         mapping = parseModelToMapping(schema)
-        mapping['_expire'] = {'type': 'long'}
+        mapping['_expireAt'] = {'type': 'long'}
         indexSchema = {
             'settings': {
                 'number_of_shards': info.searchOption['shards'],
@@ -108,21 +108,18 @@ class ElasticSearch(ModelDriverBase):
         await self._es.close()
 
     async def read(self, schema:BaseSchema, id:str):
-        try: model = (await self._es.get(index=schema.getSchemaInfo().dref, id=id)).body['_source']
+        try: model = (await self._es.get(index=schema.getSchemaInfo().dref, id=id, source_excludes=['_expireAt'])).body['_source']
         except: model = None
         return model
 
     async def search(self, schema:BaseSchema, option:SearchOption):
         info = schema.getSchemaInfo()
         if option.filter: filter = info.searchOption['filter'](option.filter)
-        else: filter = None
-
-        query = filter
-        if not query: query = {'match_all' : {}}
+        else: filter = {'match_all' : {}}
         if option.orderBy and option.order: sort = [{option.orderBy: option.order}]
         else: sort = None
 
-        models = await self._es.search(index=info.dref, source_includes=option.fields, query=filter, sort=sort, from_=option.skip, size=option.size)
+        models = await self._es.search(index=info.dref, source_includes=option.fields, source_excludes=['_expireAt'], query=filter, sort=sort, from_=option.skip, size=option.size)
         return [model['_source'] for model in models['hits']['hits']]
 
     async def count(self, schema:BaseSchema, option:SearchOption):
@@ -132,7 +129,7 @@ class ElasticSearch(ModelDriverBase):
         return (await self._es.count(index=info.dref, query=filter))['count']
 
     def __set_search_expire__(self, model, expire):
-        model['expireAt'] = expire
+        model['_expireAt'] = expire
         return model
 
     async def __generate_bulk_data__(self, schema:BaseSchema, models):

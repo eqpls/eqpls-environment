@@ -8,10 +8,11 @@ Equal Plus
 # Import
 #===============================================================================
 import json
-from time import time as tstamp
 from uuid import UUID, uuid4
+from time import time as tstamp
+from urllib.parse import urlencode
 from typing import Annotated, Callable, TypeVar, Any, List, Literal
-from pydantic import BaseModel, PlainSerializer, ConfigDict
+from pydantic import BaseModel, PlainSerializer, ConfigDict, Field
 from stringcase import snakecase, pathcase, titlecase
 
 from .exceptions import EpException
@@ -175,6 +176,7 @@ class IdentSchema:
 
 
 class StatusSchema:
+    # _expireAt:int = Field(exclude=True)
     updateBy:Key = ''
     deleted:bool = False
     tstamp:int = 0
@@ -236,48 +238,40 @@ class BaseSchema(StatusSchema, IdentSchema):
 
     @classmethod
     async def searchModels(cls,
-        fields:List[str] | None=None,
         filter:str | None=None,
         orderBy:str | None=None,
         order:Literal['asc', 'desc']=None,
         size:int | None=None,
         skip:int | None=None,
-        archive:Literal['true', 'false']=None
+        archive:bool | None=None
     ):
-        if fields: query = '&'.join([f'$f={field}' for field in fields])
-        else: query = ''
-        filter = f'$filter={filter}' if filter else None
-        if filter: query = f'{query}&{filter}' if query else filter
-        orderBy = f'$orderby={orderBy}' if orderBy else None
-        if orderBy: query = f'{query}&{orderBy}' if query else orderBy
-        order = f'$order={order}' if order else None
-        if order: query = f'{query}&{order}' if query else order
-        size = f'$size={size}' if size else None
-        if size: query = f'{query}&{size}' if query else size
-        skip = f'$skip={skip}' if skip else None
-        if skip: query = f'{query}&{skip}' if query else skip
-        archive = f'$archive={archive}' if archive else None
-        if archive: query = f'{query}&{archive}' if query else f'{archive}'
-        query = f'?{query}' if query else ''
-
         info = cls.getSchemaInfo()
         if 'r' in info.crud:
-            async with AsyncRest(info.provider) as rest:
-                models = await rest.get(f'{info.path}{query}')
+            query = {}
+            if filter: query['$filter'] = filter
+            if orderBy and order:
+                query['$orderby'] = orderBy
+                query['$order'] = order
+            if size: query['$size'] = size
+            if skip: query['$skip'] = skip
+            if archive: query['$archive'] = archive
+            url = f'{info.path}?{urlencode(query)}' if query else info.path
+            async with AsyncRest(info.provider) as rest: models = await rest.get(url)
             return [cls(**model) for model in models]
         else: raise EpException(405, 'Could Not Read Model')
 
     @classmethod
     async def countModels(cls,
         filter:str | None=None,
-        archive:bool=False
+        archive:bool | None=None
     ):
-        query = f'?$archive={str(archive).lower()}'
-        query += f'&$filter={filter}' if filter else ''
-
         info = cls.getSchemaInfo()
         if 'r' in info.crud:
-            async with AsyncRest(info.provider) as rest: count = await rest.get(f'{info.path}/count{query}')
+            query = {}
+            if filter: query['$filter'] = filter
+            if archive: query['$archive'] = archive
+            url = f'{info.path}/count?{urlencode(query)}' if query else f'{info.path}/count'
+            async with AsyncRest(info.provider) as rest: count = await rest.get(url)
             return ModelCount(**count)
         else: raise EpException(405, 'Could Not Read Model')
 
@@ -304,6 +298,15 @@ class BaseSchema(StatusSchema, IdentSchema):
         if 'd' in info.crud:
             force = '?$force=true' if force else ''
             async with AsyncRest(info.provider) as rest: status = await rest.delete(f'{info.path}/{self.id}{force}')
+            return ModelStatus(**status)
+        else: raise EpException(405, 'Could Not Delete Model')
+
+    @classmethod
+    async def deleteModelByID(cls, id:ID, force=False):
+        info = cls.getSchemaInfo()
+        if 'd' in info.crud:
+            force = '?$force=true' if force else ''
+            async with AsyncRest(info.provider) as rest: status = await rest.delete(f'{info.path}/{id}{force}')
             return ModelStatus(**status)
         else: raise EpException(405, 'Could Not Delete Model')
 
