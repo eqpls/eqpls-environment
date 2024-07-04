@@ -43,7 +43,7 @@ class BaseControl:
 
     async def __startup__(self):
         await self.startup()
-        if self._background: await runBackground(self.background())
+        if self._background: await runBackground(self.__background__())
         self.api.add_api_route(
             methods=['GET'],
             path=f'/{snakecase(self.title)}/health',
@@ -57,7 +57,7 @@ class BaseControl:
         await self.shutdown()
 
     async def __background__(self):
-        while self._background: self.background()
+        while self._background: await self.background()
 
     async def __health__(self) -> ServiceHealth: return await self.health()
 
@@ -69,7 +69,7 @@ class BaseControl:
 
     async def background(self):
         LOG.INFO('run background process')
-        asleep(1)
+        await asleep(1)
 
 
 class MeshControl(BaseControl):

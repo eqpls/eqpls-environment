@@ -162,7 +162,7 @@ def SchemaConfig(
 # Schema Abstraction
 #===============================================================================
 class IdentSchema:
-    id:ID = ''
+    id:ID = None
     sref:Key = ''
     uref:Key = ''
 
@@ -269,28 +269,11 @@ class BaseSchema(StatusSchema, IdentSchema):
 
     @classmethod
     async def countModels(cls,
-        fields:List[str] | None=None,
         filter:str | None=None,
-        orderBy:str | None=None,
-        order:Literal['asc', 'desc']=None,
-        size:int | None=None,
-        skip:int | None=None,
-        archive:Literal['true', 'false']=None
+        archive:bool=False
     ):
-        query = '&'.join([f'$f={field}' for field in fields])
-        filter += f'$filter={filter}' if filter else None
-        if filter: query += f'&{filter}' if query else f'{filter}'
-        orderBy = f'$orderby={orderBy}' if orderBy else None
-        if orderBy: query += f'&{orderBy}' if query else f'{orderBy}'
-        order = f'$order={order}' if order else None
-        if order: query += f'&{order}' if query else f'{order}'
-        size = f'$size={size}' if size else None
-        if size: query += f'&{size}' if query else f'{size}'
-        skip = f'$skip={skip}' if skip else None
-        if skip: query += f'&{skip}' if query else f'{skip}'
-        archive = f'$archive={archive}' if archive else None
-        if archive: query += f'&{archive}' if query else f'{archive}'
-        query = f'?{query}' if query else ''
+        query = f'?$archive={str(archive).lower()}'
+        query += f'&$filter={filter}' if filter else ''
 
         info = cls.getSchemaInfo()
         if 'r' in info.crud:
@@ -301,7 +284,9 @@ class BaseSchema(StatusSchema, IdentSchema):
     async def createModel(self):
         info = self.schemaInfo
         if 'c' in info.crud:
-            async with AsyncRest(info.provider) as rest: model = await rest.post(f'{info.path}', json=self)
+            data = self.dict()
+            data['id'] = '00000000-0000-0000-0000-000000000000'
+            async with AsyncRest(info.provider) as rest: model = await rest.post(f'{info.path}', json=data)
             return self.__class__(**model)
         else: raise EpException(405, 'Could Not Create Model')
 
@@ -309,7 +294,7 @@ class BaseSchema(StatusSchema, IdentSchema):
         if not self.id: raise Exception('could not find model identifier')
         info = self.schemaInfo
         if 'u' in info.crud:
-            async with AsyncRest(info.provider) as rest: model = await rest.put(f'{info.path}/{self.id}', json=self)
+            async with AsyncRest(info.provider) as rest: model = await rest.put(f'{info.path}/{self.id}', json=self.dict())
             return self.__class__(**model)
         else: raise EpException(405, 'Could Not Update Model')
 
