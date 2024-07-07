@@ -66,7 +66,7 @@ class Reference(BaseModel):
     sref:Key = ''
     uref:Key = ''
 
-    async def readModel(self):
+    async def getModel(self):
         if not self.sref or not self.uref: raise Exception('could not find references')
         if 'schemaMap' not in Reference.__pydantic_config__: raise EpException(501, 'Could Not Find SchemaMap')
         schemaMap = Reference.__pydantic_config__['schemaMap']
@@ -214,7 +214,7 @@ class BaseSchema(StatusSchema, IdentSchema):
     #===========================================================================
     # reference
     #===========================================================================
-    def makeReference(self): return Reference(id=self.id, sref=self.sref, uref=self.uref)
+    def getReference(self): return Reference(id=self.id, sref=self.sref, uref=self.uref)
 
     #===========================================================================
     # crud
