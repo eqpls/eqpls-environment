@@ -7,6 +7,7 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
+from .keyclock import KeyCloak
 from .postgresql import PostgreSql
 from .elasticsearch import ElasticSearch
-from .redis import Redis
+from .redis import RedisAuthn, RedisQueue, RedisModel

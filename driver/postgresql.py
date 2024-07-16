@@ -15,9 +15,7 @@ from stringcase import snakecase
 from psycopg import AsyncConnection
 from luqum.tree import Item, Term, SearchField, Group, FieldGroup, Range, From, To, AndOperation, OrOperation, Not, UnknownOperation
 
-from common import asleep, runBackground, EpException, BaseSchema
-from common.controls import SearchOption
-from common.drivers import ModelDriverBase
+from common import asleep, runBackground, EpException, BaseSchema, SearchOption, ModelDriverBase
 
 
 #===============================================================================
@@ -36,9 +34,9 @@ class PostgreSql(ModelDriverBase):
         self._psqlDatabase = self.config['database']
         self._psqlWriter = None
         self._psqlReader = None
-        self._psqlRestore = False
+        self._psqlConnMutex = False
 
-    async def __connect__(self):
+    async def connect(self, *args, **kargs):
         if not self._psqlWriter:
             self._psqlWriter = await AsyncConnection.connect(
                 host=self._psqlWriterHostname,
@@ -47,7 +45,6 @@ class PostgreSql(ModelDriverBase):
                 user=self._psqlUsername,
                 password=self._psqlPassword
             )
-
         if not self._psqlReader:
             self._psqlReader = await AsyncConnection.connect(
                 host=self._psqlReaderHostname,
@@ -56,27 +53,31 @@ class PostgreSql(ModelDriverBase):
                 user=self._psqlUsername,
                 password=self._psqlPassword
             )
+        return self
 
-    async def __restore__(self):
-        if not self._psqlRestore:
-            self._psqlResotre = True
+    async def disconnect(self):
+        if self._psqlWriter:
+            try: await self._psqlWriter.close()
+            except: pass
+            self._psqlWriter = None
+        if self._psqlReader:
+            try: await self._psqlReader.close()
+            except: pass
+            self._psqlReader = None
+
+    async def reconnect(self):
+        if not self._psqlConnMutex:
+            self._psqlConnMutex = True
             await runBackground(self.__restore_background__())
 
     async def __restore_background__(self):
         while True:
             await asleep(1)
-            if self._psqlWriter:
-                try: await self._psqlWriter.close()
-                except: pass
-                self._psqlWriter = None
-            if self._psqlReader:
-                try: await self._psqlReader.close()
-                except: pass
-                self._psqlReader = None
-            try: await self.__connect__()
+            await self.disconnect()
+            try: await self.connect()
             except: continue
             break
-        self._psqlRestore = False
+        self._psqlConnMutex = False
 
     def __parseLuceneToTsquery__(self, node:Item):
         nodeType = type(node)
@@ -217,17 +218,13 @@ class PostgreSql(ModelDriverBase):
         info.databaseOption['loaders'] = loaders
         info.databaseOption['indices'] = indices
 
-        try: await self.__connect__()
+        try: await self.connect()
         except: exit(1)
         async with self._psqlWriter.cursor() as cursor:
             await cursor.execute(f"CREATE TABLE IF NOT EXISTS {info.dref} ({','.join(columns)});")
             await self._psqlWriter.commit()
 
         info.database = self
-
-    async def close(self):
-        await self._psqlWriter.close()
-        await self._psqlReader.close()
 
     async def read(self, schema:BaseSchema, id:str):
         info = schema.getSchemaInfo()
@@ -239,7 +236,7 @@ class PostgreSql(ModelDriverBase):
             record = await cursor.fetchone()
         except Exception as e:
             await cursor.close()
-            await self.__restore__()
+            await self.reconnect()
             raise e
         await cursor.close()
 
@@ -262,20 +259,12 @@ class PostgreSql(ModelDriverBase):
             termFields = [field.split('.')[0] for field in option.fields]
             columns = ','.join([snakecase(field) for field in termFields])
         else: columns = '*'
-        if option.query:
-            query = option.query
-            conditions = []
-            for key, val in query.items():
-                if type(val) in [str, UUID]: conditions.append(f"{snakecase(key)}='{val}'")
-                else: conditions.append(f'{snakecase(key)}={val}')
-            query = [f"{' AND '.join(conditions)}"]
-        else: query = []
         if option.filter:
             filter = self.__parseLuceneToTsquery__(option.filter)
             if filter: filter = [filter]
             else: filter = []
         else: filter = []
-        condition = ' AND '.join(query + filter)
+        condition = ' AND '.join(filter)
         if condition: condition = f' AND {condition}'
         if option.orderBy and option.order: condition = f'{condition} ORDER BY {snakecase(option.orderBy)} {option.order.upper()}'
         if option.size:
@@ -294,7 +283,7 @@ class PostgreSql(ModelDriverBase):
             else: records = await cursor.fetchall()
         except Exception as e:
             await cursor.close()
-            await self.__restore__()
+            await self.reconnect()
             raise e
         await cursor.close()
 
@@ -324,17 +313,12 @@ class PostgreSql(ModelDriverBase):
     async def count(self, schema:BaseSchema, option:SearchOption):
         info = schema.getSchemaInfo()
 
-        if option.query:
-            query = option.query
-            conditions = []
-            for key, val in query.items():
-                if type(val) in [str, UUID]: conditions.append(f"{snakecase(key)}='{val}'")
-                else: conditions.append(f'{snakecase(key)}={val}')
-            query = [f"{' AND '.join(conditions)}"]
-        else: query = []
-        if option.filter: filter = [self.__parseLuceneToTsquery__(option.filter)]
+        if option.filter:
+            filter = self.__parseLuceneToTsquery__(option.filter)
+            if filter: filter = [filter]
+            else: filter = []
         else: filter = []
-        condition = ' AND '.join(query + filter)
+        condition = ' AND '.join(filter)
         if condition: condition = f' AND {condition}'
         query = f'SELECT COUNT(*) FROM {info.dref} WHERE deleted=FALSE{condition};'
 
@@ -344,7 +328,7 @@ class PostgreSql(ModelDriverBase):
             count = await cursor.fetchone()
         except Exception as e:
             await cursor.close()
-            await self.__restore__()
+            await self.reconnect()
             raise e
         await cursor.close()
         return count[0]
@@ -369,7 +353,7 @@ class PostgreSql(ModelDriverBase):
                 await self._psqlWriter.commit()
             except Exception as e:
                 await cursor.close()
-                await self.__restore__()
+                await self.reconnect()
                 raise e
             await cursor.close()
             return results
@@ -398,7 +382,7 @@ class PostgreSql(ModelDriverBase):
                 await self._psqlWriter.commit()
             except Exception as e:
                 await cursor.close()
-                await self.__restore__()
+                await self.reconnect()
                 raise e
             await cursor.close()
             return results
@@ -415,7 +399,7 @@ class PostgreSql(ModelDriverBase):
             await self._psqlWriter.commit()
         except Exception as e:
             await cursor.close()
-            await self.__restore__()
+            await self.reconnect()
             raise e
         await cursor.close()
         return result

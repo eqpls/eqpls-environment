@@ -7,7 +7,9 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
-
+from typing import Annotated
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, APIKeyHeader
 
 #===============================================================================
 # Implement
@@ -55,3 +57,25 @@ class TimeString:
     def str2int(cls, key):
         try: return cls.__getattribute__(cls, key)
         except: return str(key)
+
+
+class AuthLevel:
+
+    A = 1
+    AA = 11
+    AAA = 101
+
+    @classmethod
+    def checkAuthorization(cls, checker): return True if checker > 0 else False
+
+    @classmethod
+    def checkAuthentication(cls, checker): return True if checker > 10 else False
+
+    @classmethod
+    def checkAccount(cls, checker): return True if checker > 100 else False
+
+# RealmHeader = APIKeyHeader(name='Realm', auto_error=False)
+# AuthorizationHeader = HTTPBearer()
+
+RealmHeader = Annotated[str | None, Depends(APIKeyHeader(name='Realm', auto_error=False))]
+AuthorizationHeader = Annotated[HTTPAuthorizationCredentials, Depends(HTTPBearer())]
