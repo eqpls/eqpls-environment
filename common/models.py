@@ -11,37 +11,45 @@ import json
 from uuid import UUID, uuid4
 from time import time as tstamp
 from urllib.parse import urlencode
-from typing import Annotated, Callable, TypeVar, Any, List, Literal
+from typing import Annotated, Callable, TypeVar, Any, Literal
 from pydantic import BaseModel, PlainSerializer, ConfigDict
 from stringcase import snakecase, pathcase, titlecase
 
-from .constants import AuthLevel
+from .constants import SECONDS, AAA
 from .tools import mergeArray
 from .exceptions import EpException
 from .interfaces import AsyncRest
 
-
 #===============================================================================
-# Search Option
+# Interfaces
 #===============================================================================
-class SearchOption:
+_REFERENCE_FIELDS = ['id', 'sref', 'uref']
+_REFERENCE_SETS = set(_REFERENCE_FIELDS)
 
+
+class Search:
+    
     def __init__(
         self,
-        fields:List[str] | None=None,
-        filter:Any | None=None,
+        fields:list[str] | None=None,
+        query:Any | None=None,
         orderBy:str | None=None,
         order:str | None=None,
         size:int | None=None,
         skip:int | None=None,
     ):
-        if fields: self.fields = mergeArray(['id', 'type', 'ref'], fields)
+        if fields: self.fields = _REFERENCE_FIELDS + list(set(self.fields) - _REFERENCE_SETS)
         else: self.fields = None
-        self.filter = filter
+        self.query = query
         self.orderBy = orderBy
         self.order = order
         self.size = size
         self.skip = skip
+
+
+class Option(dict):
+
+    def __init__(self, **kargs): dict.__init__(self, **kargs)
 
 
 #===============================================================================
@@ -66,27 +74,31 @@ class Reference(BaseModel):
     sref:Key = ''
     uref:Key = ''
 
-    async def getModel(self):
+    async def getModel(self, token=None, realm=None):
         if not self.sref or not self.uref: raise EpException(400, 'Bad Request')
-        if 'schemaMap' not in Reference.__pydantic_config__: raise EpException(501, 'Not Implemented')
+        if 'schemaMap' not in Reference.__pydantic_config__: raise EpException(500, 'Internal Server Error')
         schemaMap = Reference.__pydantic_config__['schemaMap']
         if self.sref not in schemaMap: raise EpException(501, 'Not Implemented')
         schema = schemaMap[self.sref]
-        info = schema.getSchemaInfo()
-        if 'r' in info.crud:
-            async with AsyncRest(info.provider) as rest:
-                model = await rest.get(self.uref)
-            return schema(**model)
+        schemaInfo = schema.getSchemaInfo()
+        if 'r' in schemaInfo.crud:
+            headers = {}
+            if token: headers['Authorization'] = f'Bearer {token}'
+            if realm: headers['Realm'] = realm
+            async with AsyncRest(schemaInfo.provider) as rest: return schema(**(await rest.get(self.uref, headers=headers)))
         else: raise EpException(405, 'Method Not Allowed')
 
 
 class ModelStatus(BaseModel):
     id:ID = ''
+    sref:Key = ''
+    uref:Key = ''
     status:str = ''
 
 
 class ModelCount(BaseModel):
-    path:str = ''
+    sref:Key = ''
+    uref:Key = ''
     query:str = ''
     result:int = 0
 
@@ -94,14 +106,6 @@ class ModelCount(BaseModel):
 #===============================================================================
 # Schema Info
 #===============================================================================
-_TypeT = TypeVar('_TypeT', bound=type)
-
-
-class LayerOpt(dict):
-
-    def __init__(self, **kargs): dict.__init__(self, **kargs)
-
-
 class SchemaInfo(BaseModel):
 
     provider:str = ''
@@ -116,20 +120,20 @@ class SchemaInfo(BaseModel):
     tags:list[str] = []
     crud:str = 'crud'
     layer:str = 'csd'
-    auth:int = 0
-    cache:Any | None = None
-    cacheOption:Any | None = None
-    search:Any | None = None
-    searchOption:Any | None = None
-    database:Any | None = None
-    databaseOption:Any | None = None
+    aaa:Option | None = None
+    cache:Option | None = None
+    search:Option | None = None
+    database:Option | None = None
+
+
+_TypeT = TypeVar('_TypeT', bound=type)
 
 
 def SchemaConfig(
-    minor:int,
+    version:int,
     crud:str='crud',
     layer:str='csd',
-    auth:int=0,
+    aaa:int=0,
     cacheOption:Any | None=None,
     searchOption:Any | None=None,
     databaseOption:Any | None=None
@@ -144,17 +148,17 @@ def SchemaConfig(
         tags = [titlecase('.'.join(reversed(modsrt.lower().split('.'))))]
         TypedDictClass.__pydantic_config__ = ConfigDict(
             schemaInfo=SchemaInfo(
-                minor=minor,
+                minor=version,
                 name=name,
                 module=module,
                 sref=sref,
                 tags=tags,
                 crud=crud,
                 layer=layer,
-                auth=auth,
-                cacheOption=cacheOption if cacheOption else LayerOpt(),
-                searchOption=searchOption if searchOption else LayerOpt(),
-                databaseOption=databaseOption if databaseOption else LayerOpt()
+                aaa=aaa,
+                cacheOption=cacheOption if cacheOption else Option(),
+                searchOption=searchOption if searchOption else Option(),
+                databaseOption=databaseOption if databaseOption else Option()
             )
         )
         return TypedDictClass
@@ -198,27 +202,28 @@ class BaseSchema(StatusSchema, IdentSchema):
     # schema info
     #===========================================================================
     @classmethod
-    def setSchemaInfo(cls, major, service, provider=''):
-        info = cls.getSchemaInfo()
-        info.provider = provider
-        info.service = service
-        info.major = major
-        lowerSchemaRef = info.sref.lower()
-        info.dref = snakecase(f'{lowerSchemaRef}.{major}.{info.minor}')
-        info.path = f'/{service}/' + pathcase(f'v{major}.{lowerSchemaRef}')
+    def setSchemaInfo(cls, provider, service, version):
+        schemaInfo = cls.getSchemaInfo()
+        schemaInfo.provider = provider if provider else ''
+        schemaInfo.service = service
+        schemaInfo.major = version
+        lowerSchemaRef = schemaInfo.sref.lower()
+        schemaInfo.dref = snakecase(f'{lowerSchemaRef}.{version}.{schemaInfo.minor}')
+        schemaInfo.path = f'/{service}/' + pathcase(f'v{version}.{lowerSchemaRef}')
         if '__pydantic_config__' not in Reference.__dict__: Reference.__pydantic_config__ = ConfigDict(schemaMap={})
-        Reference.__pydantic_config__['schemaMap'][info.sref] = cls
+        Reference.__pydantic_config__['schemaMap'][schemaInfo.sref] = cls
 
     @classmethod
     def getSchemaInfo(cls): return cls.__pydantic_config__['schemaInfo']
+    
+    @property
+    def schema(self): return self.__class__
 
     @property
-    def schemaInfo(self): return self.__class__.getSchemaInfo()
-
-    #===========================================================================
-    # reference
-    #===========================================================================
-    def getReference(self): return Reference(id=self.id, sref=self.sref, uref=self.uref)
+    def schemaInfo(self): return self.schema.getSchemaInfo()
+    
+    @property
+    def reference(self): return Reference(id=self.id, sref=self.sref, uref=self.uref)
 
     #===========================================================================
     # crud
@@ -230,7 +235,7 @@ class BaseSchema(StatusSchema, IdentSchema):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
             if realm: headers['Realm'] = realm
-            async with AsyncRest(info.provider) as rest: return self.__class__(**(await rest.get(self.uref, headers=headers)))
+            async with AsyncRest(info.provider) as rest: return self.schema(**(await rest.get(self.uref, headers=headers)))
         else: raise EpException(405, 'Method Not Allowed')
 
     @classmethod
@@ -301,7 +306,7 @@ class BaseSchema(StatusSchema, IdentSchema):
             data = self.dict()
             data['id'] = '00000000-0000-0000-0000-000000000000'
             async with AsyncRest(info.provider) as rest: model = await rest.post(f'{info.path}', headers=headers, json=data)
-            return self.__class__(**model)
+            return self.schema(**model)
         else: raise EpException(405, 'Method Not Allowed')
 
     async def updateModel(self, token=None, realm=None):
@@ -312,7 +317,7 @@ class BaseSchema(StatusSchema, IdentSchema):
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
             if realm: headers['Realm'] = realm
             async with AsyncRest(info.provider) as rest: model = await rest.put(f'{info.path}/{self.id}', headers=headers, json=self.dict())
-            return self.__class__(**model)
+            return self.schema(**model)
         else: raise EpException(405, 'Method Not Allowed')
 
     async def deleteModel(self, force=False, token=None, realm=None):
@@ -388,6 +393,18 @@ class MetaSchema:
 #===============================================================================
 # Auth Schema
 #===============================================================================
+@SchemaConfig(
+version=1,
+aaa=AAA.AA,
+cacheOption=Option(expire=SECONDS.HOUR),
+searchOption=Option(expire=SECONDS.WEEK))
+class Policy(BaseModel, ProfSchema, BaseSchema):
+    readAllowed: list[str] = []
+    createAllowed: list[str] = []
+    updateAllowed: list[str] = []
+    deleteAllowed: list[str] = []
+
+    
 class AuthInfo(BaseModel):
     realm:str
     username:str
@@ -413,15 +430,3 @@ class AuthInfo(BaseModel):
     def checkUpdateAllowed(self, sref): return True if sref in self.updateAllowed else False
 
     def checkDeleteAllowed(self, sref): return True if sref in self.deleteAllowed else False
-
-
-@SchemaConfig(
-minor=1,
-auth=AuthLevel.AA,
-cacheOption=LayerOpt(expire=86400),
-searchOption=LayerOpt(expire=2419200))
-class Policy(BaseModel, ProfSchema, BaseSchema):
-    readAllowed: list[str]
-    createAllowed: list[str]
-    updateAllowed: list[str]
-    deleteAllowed: list[str]

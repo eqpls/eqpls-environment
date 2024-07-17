@@ -84,7 +84,7 @@ class MeshControl(BaseControl):
 
     async def registerModel(self, schema:BaseSchema, service):
         if service not in self.providers: raise Exception(f'{service} is not in [providers] configuration')
-        schema.setSchemaInfo(self.version, service, self.providers[service])
+        schema.setSchemaInfo(self.providers[service], service, self.version)
         return self
 
 
@@ -157,7 +157,7 @@ class UerpControl(BaseControl):
             await asleep(self._uerpUpdatePolicySec)
 
     async def registerModel(self, schema:BaseSchema):
-        schema.setSchemaInfo(self.version, self.title)
+        schema.setSchemaInfo(None, self.title, self.version)
         schemaInfo = schema.getSchemaInfo()
 
         if 'd' in schemaInfo.layer and self._database: await self._database.registerModel(schema)
