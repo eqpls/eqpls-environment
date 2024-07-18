@@ -25,6 +25,7 @@ from .interfaces import AsyncRest
 #===============================================================================
 _REFERENCE_FIELDS = ['id', 'sref', 'uref']
 _REFERENCE_SETS = set(_REFERENCE_FIELDS)
+_EMPTY_UUID = '00000000-0000-0000-0000-000000000000'
 
 
 class Search:
@@ -75,6 +76,9 @@ class Reference(BaseModel):
     id:ID = ''
     sref:Key = ''
     uref:Key = ''
+
+    @classmethod
+    def createNoneReference(cls): return cls(id=_EMPTY_UUID, sref='', uref='')
 
     async def getModel(self, token=None, org=None):
         if not self.sref or not self.uref: raise EpException(400, 'Bad Request')
@@ -135,9 +139,9 @@ _TypeT = TypeVar('_TypeT', bound=type)
 
 def SchemaConfig(
     version:int,
-    crud:int = CRUD.CRUD,
-    layer:int = LAYER.CSD,
-    aaa:int = AAA.FREE,
+    crud:int=CRUD.CRUD,
+    layer:int=LAYER.CSD,
+    aaa:int=AAA.FREE,
     cache:Option | None=None,
     search:Option | None=None,
     database:Option | None=None

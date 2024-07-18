@@ -10,7 +10,8 @@ Equal Plus
 from pydantic import BaseModel
 
 from .constants import SECONDS, AAA
-from .models import Option, SchemaConfig, BaseSchema, ProfSchema
+from .models import Option, SchemaConfig, ID, Key, BaseSchema, ProfSchema, Reference
+
 
 #===============================================================================
 # Implement
@@ -56,3 +57,17 @@ class AuthInfo(BaseModel):
     def checkUpdateACL(self, sref): return True if sref in self.aclUpdate else False
 
     def checkDeleteACL(self, sref): return True if sref in self.aclDelete else False
+
+
+class UserInfo(BaseModel, ProfSchema, BaseSchema):
+
+    id:ID = ''
+    username:Key = ''
+    email:Key = ''
+    role:list[str] = []
+
+    name:str = ''
+    givenName:str = ''
+    familyName:str = ''
+
+    detail: Reference
