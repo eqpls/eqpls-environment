@@ -7,7 +7,6 @@ Equal Plus
 #===============================================================================
 # Import
 #===============================================================================
-import json
 import inspect
 import datetime
 from uuid import UUID
@@ -16,7 +15,7 @@ from pydantic import BaseModel
 from elasticsearch import AsyncElasticsearch, helpers
 from luqum.elasticsearch import ElasticsearchQueryBuilder, SchemaAnalyzer
 
-from common import EpException, BaseSchema, SearchOption, ModelDriverBase
+from common import EpException, BaseSchema, Search, ModelDriverBase
 
 
 #===============================================================================
@@ -54,9 +53,9 @@ class ElasticSearch(ModelDriverBase):
     async def registerModel(self, schema:BaseSchema, *args, **kargs):
         info = schema.getSchemaInfo()
 
-        if 'shards' not in info.searchOption or not info.searchOption['shards']: info.searchOption['shards'] = self._esShards
-        if 'replicas' not in info.searchOption or not info.searchOption['replicas']: info.searchOption['replicas'] = self._esReplicas
-        if 'expire' not in info.searchOption or not info.searchOption['expire']: info.searchOption['expire'] = self._esExpire
+        if 'shards' not in info.search or not info.search['shards']: info.search['shards'] = self._esShards
+        if 'replicas' not in info.search or not info.search['replicas']: info.search['replicas'] = self._esReplicas
+        if 'expire' not in info.search or not info.search['expire']: info.search['expire'] = self._esExpire
 
         def parseModelToMapping(schema):
 
@@ -102,36 +101,34 @@ class ElasticSearch(ModelDriverBase):
         mapping['_expireAt'] = {'type': 'long'}
         indexSchema = {
             'settings': {
-                'number_of_shards': info.searchOption['shards'],
-                'number_of_replicas': info.searchOption['replicas']
+                'number_of_shards': info.search['shards'],
+                'number_of_replicas': info.search['replicas']
             },
             'mappings': {
                 'properties': mapping
             }
         }
         if not await self._esConn.indices.exists(index=info.dref): await self._esConn.indices.create(index=info.dref, body=indexSchema)
-        info.searchOption['filter'] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
-
-        info.search = self
+        info.search['filter'] = ElasticsearchQueryBuilder(**SchemaAnalyzer(indexSchema).query_builder_options())
 
     async def read(self, schema:BaseSchema, id:str):
         try: model = (await self._esConn.get(index=schema.getSchemaInfo().dref, id=id, source_excludes=['_expireAt'])).body['_source']
         except: model = None
         return model
 
-    async def search(self, schema:BaseSchema, option:SearchOption):
+    async def search(self, schema:BaseSchema, search:Search):
         info = schema.getSchemaInfo()
-        if option.filter: filter = info.searchOption['filter'](option.filter)
+        if search.filter: filter = info.search['filter'](search.filter)
         else: filter = {'match_all': {}}
-        if option.orderBy and option.order: sort = [{option.orderBy: option.order}]
+        if search.orderBy and search.order: sort = [{search.orderBy: search.order}]
         else: sort = None
 
-        models = await self._esConn.search(index=info.dref, source_includes=option.fields, source_excludes=['_expireAt'], query=filter, sort=sort, from_=option.skip, size=option.size)
+        models = await self._esConn.search(index=info.dref, source_includes=search.fields, source_excludes=['_expireAt'], query=filter, sort=sort, from_=search.skip, size=search.size)
         return [model['_source'] for model in models['hits']['hits']]
 
-    async def count(self, schema:BaseSchema, option:SearchOption):
+    async def count(self, schema:BaseSchema, search:Search):
         info = schema.getSchemaInfo()
-        if option.filter: filter = info.searchOption['filter'](option.filter)
+        if search.filter: filter = info.search['filter'](search.filter)
         else: filter = {'match_all': {}}
         return (await self._esConn.count(index=info.dref, query=filter))['count']
 
@@ -141,7 +138,7 @@ class ElasticSearch(ModelDriverBase):
 
     async def __generate_bulk_data__(self, schema:BaseSchema, models):
         info = schema.getSchemaInfo()
-        expire = int(tstamp()) + info.searchOption['expire']
+        expire = int(tstamp()) + info.search['expire']
         for model in models:
             yield {
                 '_op_type': 'update',

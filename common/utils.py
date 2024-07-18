@@ -53,3 +53,7 @@ class Logger:
     def ERROR(self, message): self._logger.error(self._formatter_(message))
 
     def CRITICAL(self, message): self._logger.critical(self._formatter_(message))
+
+
+def mergeArray(arr1, arr2):
+    return arr1 + list(set(arr2) - set(arr1))

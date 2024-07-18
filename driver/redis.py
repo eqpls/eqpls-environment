@@ -119,19 +119,18 @@ class RedisModel(ModelDriverBase):
 
     async def registerModel(self, schema:BaseSchema, *args, **kargs):
         info = schema.getSchemaInfo()
-        if 'expire' not in info.cacheOption or not info.cacheOption['expire']: info.cacheOption['expire'] = self._redisExpire
-        info.cache = self
+        if 'expire' not in info.cache or not info.cache['expire']: info.cache['expire'] = self._redisExpire
 
     async def read(self, schema:BaseSchema, id:str):
         info = schema.getSchemaInfo()
         async with self._redisConn.pipeline(transaction=True) as pipeline:
-            model = (await pipeline.get(id).expire(id, info.cacheOption['expire']).execute())[0]
+            model = (await pipeline.get(id).expire(id, info.cache['expire']).execute())[0]
         if model: model = json.loads(model)
         return model
 
     async def __set_redis_data__(self, schema, models):
         info = schema.getSchemaInfo()
-        expire = info.cacheOption['expire']
+        expire = info.cache['expire']
         async with self._redisConn.pipeline(transaction=True) as pipeline:
             for model in models: pipeline.set(model['id'], json.dumps(model, separators=(',', ':')), expire)
             await pipeline.execute()

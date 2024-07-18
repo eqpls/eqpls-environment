@@ -15,7 +15,7 @@ from stringcase import snakecase
 from psycopg import AsyncConnection
 from luqum.tree import Item, Term, SearchField, Group, FieldGroup, Range, From, To, AndOperation, OrOperation, Not, UnknownOperation
 
-from common import asleep, runBackground, EpException, BaseSchema, SearchOption, ModelDriverBase
+from common import asleep, runBackground, EpException, BaseSchema, Search, ModelDriverBase
 
 
 #===============================================================================
@@ -212,19 +212,17 @@ class PostgreSql(ModelDriverBase):
             else: raise EpException(500, f'database.registerModel({schema}.{field}{fieldType}): could not parse schema')
             index += 1
 
-        info.databaseOption['fields'] = fields
-        info.databaseOption['snakes'] = snakes
-        info.databaseOption['dumpers'] = dumpers
-        info.databaseOption['loaders'] = loaders
-        info.databaseOption['indices'] = indices
+        info.database['fields'] = fields
+        info.database['snakes'] = snakes
+        info.database['dumpers'] = dumpers
+        info.database['loaders'] = loaders
+        info.database['indices'] = indices
 
         try: await self.connect()
         except: exit(1)
         async with self._psqlWriter.cursor() as cursor:
             await cursor.execute(f"CREATE TABLE IF NOT EXISTS {info.dref} ({','.join(columns)});")
             await self._psqlWriter.commit()
-
-        info.database = self
 
     async def read(self, schema:BaseSchema, id:str):
         info = schema.getSchemaInfo()
@@ -241,8 +239,8 @@ class PostgreSql(ModelDriverBase):
         await cursor.close()
 
         if record:
-            fields = info.databaseOption['fields']
-            loaders = info.databaseOption['loaders']
+            fields = info.database['fields']
+            loaders = info.database['loaders']
             index = 0
             model = {}
             for column in record:
@@ -251,26 +249,26 @@ class PostgreSql(ModelDriverBase):
             return model
         return None
 
-    async def search(self, schema:BaseSchema, option:SearchOption):
+    async def search(self, schema:BaseSchema, search:Search):
         info = schema.getSchemaInfo()
         unique = False
 
-        if option.fields:
-            termFields = [field.split('.')[0] for field in option.fields]
+        if search.fields:
+            termFields = [field.split('.')[0] for field in search.fields]
             columns = ','.join([snakecase(field) for field in termFields])
         else: columns = '*'
-        if option.filter:
-            filter = self.__parseLuceneToTsquery__(option.filter)
+        if search.filter:
+            filter = self.__parseLuceneToTsquery__(search.filter)
             if filter: filter = [filter]
             else: filter = []
         else: filter = []
         condition = ' AND '.join(filter)
         if condition: condition = f' AND {condition}'
-        if option.orderBy and option.order: condition = f'{condition} ORDER BY {snakecase(option.orderBy)} {option.order.upper()}'
-        if option.size:
-            if option.size == 1: unique = True
-            condition = f'{condition} LIMIT {option.size}'
-        if option.skip: condition = f'{condition} OFFSET {option.skip}'
+        if search.orderBy and search.order: condition = f'{condition} ORDER BY {snakecase(search.orderBy)} {search.order.upper()}'
+        if search.size:
+            if search.size == 1: unique = True
+            condition = f'{condition} LIMIT {search.size}'
+        if search.skip: condition = f'{condition} OFFSET {search.skip}'
         query = f'SELECT {columns} FROM {info.dref} WHERE deleted=FALSE{condition};'
 
         cursor = self._psqlReader.cursor()
@@ -287,11 +285,11 @@ class PostgreSql(ModelDriverBase):
             raise e
         await cursor.close()
 
-        fields = info.databaseOption['fields']
-        loaders = info.databaseOption['loaders']
+        fields = info.database['fields']
+        loaders = info.database['loaders']
         models = []
-        if option.fields:
-            indices = info.databaseOption['indices']
+        if search.fields:
+            indices = info.database['indices']
             for record in records:
                 index = 0
                 model = {}
@@ -310,11 +308,11 @@ class PostgreSql(ModelDriverBase):
                 models.append(model)
         return models
 
-    async def count(self, schema:BaseSchema, option:SearchOption):
+    async def count(self, schema:BaseSchema, search:Search):
         info = schema.getSchemaInfo()
 
-        if option.filter:
-            filter = self.__parseLuceneToTsquery__(option.filter)
+        if search.filter:
+            filter = self.__parseLuceneToTsquery__(search.filter)
             if filter: filter = [filter]
             else: filter = []
         else: filter = []
@@ -336,8 +334,8 @@ class PostgreSql(ModelDriverBase):
     async def create(self, schema:BaseSchema, *models):
         if models:
             info = schema.getSchemaInfo()
-            fields = info.databaseOption['fields']
-            dumpers = info.databaseOption['dumpers']
+            fields = info.database['fields']
+            dumpers = info.database['dumpers']
             cursor = self._psqlWriter.cursor()
             try:
                 for model in models:
@@ -362,9 +360,9 @@ class PostgreSql(ModelDriverBase):
     async def update(self, schema:BaseSchema, *models):
         if models:
             info = schema.getSchemaInfo()
-            fields = info.databaseOption['fields']
-            snakes = info.databaseOption['snakes']
-            dumpers = info.databaseOption['dumpers']
+            fields = info.database['fields']
+            snakes = info.database['snakes']
+            dumpers = info.database['dumpers']
             cursor = self._psqlWriter.cursor()
             try:
                 for model in models:

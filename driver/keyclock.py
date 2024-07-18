@@ -8,8 +8,7 @@ Created on 2024. 2. 8.
 # Import
 #===============================================================================
 from typing import Optional
-from common import EpException, AsyncRest
-from common.drivers import DriverBase
+from common import EpException, AsyncRest, DriverBase
 
 
 #===============================================================================
@@ -24,6 +23,7 @@ class KeyCloak(DriverBase):
         self._kcUsername = self.config['username']
         self._kcPassword = self.config['password']
         self._kcFrontend = self.config['frontend']
+        self._kcRBACAttribute = self.config['rbac_attribute']
         self._kcDomain = self.config['domain']
         self._kcDefaultRealm = self.config['default_realm']
         self._kcAdminUsername = self.config['admin_username']
@@ -51,12 +51,14 @@ class KeyCloak(DriverBase):
             try: await self.getRealm(self._kcDefaultRealm)
             except EpException as e:
                 if e.status_code == 404:
-                    if await self.createRealm(self._kcDefaultRealm, self._kcDefaultRealm):
-                        adminGroup = await self.createGroup(self._kcDefaultRealm, 'Administrator', {'policy': ['admin']})
-                        userGroup = await self.createGroup(self._kcDefaultRealm, 'Users', {'policy': ['user']})
-                        user = await self.createUser(self._kcDefaultRealm, self._kcAdminUsername, self._kcAdminPassword, f'{self._kcAdminUsername}@{self._kcDomain}', self._kcAdminUsername, self._kcAdminUsername)
-                        await self.registerUserToGroup(self._kcDefaultRealm, user['id'], adminGroup['id'])
-                        await self.registerUserToGroup(self._kcDefaultRealm, user['id'], userGroup['id'])
+                    if await self.createRealm(self._kcDefaultRealm, self._kcDefaultRealm, self._kcRBACAttribute):
+                        adminGroup = await self.createGroup(self._kcDefaultRealm, 'Administrator', {self._kcRBACAttribute: ['admin']})
+                        userGroup = await self.createGroup(self._kcDefaultRealm, 'Users', {self._kcRBACAttribute: ['user']})
+                        systemUser = await self.createUser(self._kcDefaultRealm, self._kcUsername, self._kcPassword, f'{self._kcUsername}@{self._kcDomain}', self._kcUsername, self._kcUsername)
+                        adminUser = await self.createUser(self._kcDefaultRealm, self._kcAdminUsername, self._kcAdminPassword, f'{self._kcAdminUsername}@{self._kcDomain}', self._kcAdminUsername, self._kcAdminUsername)
+                        await self.registerUserToGroup(self._kcDefaultRealm, systemUser['id'], adminGroup['id'])
+                        await self.registerUserToGroup(self._kcDefaultRealm, adminUser['id'], adminGroup['id'])
+                        await self.registerUserToGroup(self._kcDefaultRealm, adminUser['id'], userGroup['id'])
                 else: raise e
             self._kcInitialized = True
         return self
@@ -120,11 +122,11 @@ class KeyCloak(DriverBase):
         if realm != 'master': return await self.get(f'/admin/realms/{realm}')
         return None
 
-    async def createRealm(self, realm:str, displayName:str):
+    async def createRealm(self, realm:str, displayName:str, rbacAttribute:str):
         if realm == 'master': raise EpException(400, 'Could not create realm with predefined name')
-        return await self.createRealmPrivileged(realm, displayName)
+        return await self.createRealmPrivileged(realm, displayName, rbacAttribute)
 
-    async def createRealmPrivileged(self, realm:str, displayName:str):
+    async def createRealmPrivileged(self, realm:str, displayName:str, rbacAttribute:str):
         await self.post(f'/admin/realms', {
             'realm': realm,
             'displayName': displayName,
@@ -146,12 +148,12 @@ class KeyCloak(DriverBase):
             if scope['name'] == 'openid-client-scope': scopeId = scope['id']; break
         else: raise EpException(404, 'Could not find client scope')
         await self.post(f'/admin/realms/{realm}/client-scopes/{scopeId}/protocol-mappers/models', {
-            'name': 'policy',
+            'name': rbacAttribute,
             'protocol': 'openid-connect',
             'protocolMapper': 'oidc-usermodel-attribute-mapper',
             'config': {
-                'claim.name': 'policy',
-                'user.attribute': 'policy',
+                'claim.name': rbacAttribute,
+                'user.attribute': rbacAttribute,
                 'jsonType.label': 'String',
                 'multivalued': True,
                 'aggregate.attrs': True,

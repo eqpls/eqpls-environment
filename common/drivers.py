@@ -25,6 +25,17 @@ class DriverBase:
     async def disconnect(self): pass
 
 
+class AuthDriverBase(DriverBase):
+
+    def __init__(self, name, config): DriverBase.__init__(self, name, config)
+
+    async def refreshInfos(self): pass
+
+    async def refreshRBACs(self, rbacs): pass
+
+    async def getAuthInfo(self, token, org): pass
+
+
 class KeyValueDriverBase(DriverBase):
 
     def __init__(self, name, config): DriverBase.__init__(self, name, config)

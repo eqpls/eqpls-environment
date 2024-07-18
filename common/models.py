@@ -8,6 +8,7 @@ Equal Plus
 # Import
 #===============================================================================
 import json
+
 from uuid import UUID, uuid4
 from time import time as tstamp
 from urllib.parse import urlencode
@@ -15,8 +16,7 @@ from typing import Annotated, Callable, TypeVar, Any, Literal
 from pydantic import BaseModel, PlainSerializer, ConfigDict
 from stringcase import snakecase, pathcase, titlecase
 
-from .constants import SECONDS, AAA
-from .tools import mergeArray
+from .constants import CRUD, LAYER, AAA
 from .exceptions import EpException
 from .interfaces import AsyncRest
 
@@ -28,11 +28,11 @@ _REFERENCE_SETS = set(_REFERENCE_FIELDS)
 
 
 class Search:
-    
+
     def __init__(
         self,
         fields:list[str] | None=None,
-        query:Any | None=None,
+        filter:Any | None=None,
         orderBy:str | None=None,
         order:str | None=None,
         size:int | None=None,
@@ -40,7 +40,7 @@ class Search:
     ):
         if fields: self.fields = _REFERENCE_FIELDS + list(set(self.fields) - _REFERENCE_SETS)
         else: self.fields = None
-        self.query = query
+        self.filter = filter
         self.orderBy = orderBy
         self.order = order
         self.size = size
@@ -63,6 +63,7 @@ Key = Annotated[str, 'keyword']
 # Pre-Defined Models
 #===============================================================================
 class ServiceHealth(BaseModel):
+
     title:str = ''
     status:str = ''
     healthy:bool = False
@@ -70,11 +71,12 @@ class ServiceHealth(BaseModel):
 
 
 class Reference(BaseModel):
+
     id:ID = ''
     sref:Key = ''
     uref:Key = ''
 
-    async def getModel(self, token=None, realm=None):
+    async def getModel(self, token=None, org=None):
         if not self.sref or not self.uref: raise EpException(400, 'Bad Request')
         if 'schemaMap' not in Reference.__pydantic_config__: raise EpException(500, 'Internal Server Error')
         schemaMap = Reference.__pydantic_config__['schemaMap']
@@ -84,12 +86,13 @@ class Reference(BaseModel):
         if 'r' in schemaInfo.crud:
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             async with AsyncRest(schemaInfo.provider) as rest: return schema(**(await rest.get(self.uref, headers=headers)))
         else: raise EpException(405, 'Method Not Allowed')
 
 
 class ModelStatus(BaseModel):
+
     id:ID = ''
     sref:Key = ''
     uref:Key = ''
@@ -97,6 +100,7 @@ class ModelStatus(BaseModel):
 
 
 class ModelCount(BaseModel):
+
     sref:Key = ''
     uref:Key = ''
     query:str = ''
@@ -118,12 +122,12 @@ class SchemaInfo(BaseModel):
     dref:str = ''
     path:str = ''
     tags:list[str] = []
-    crud:str = 'crud'
-    layer:str = 'csd'
-    aaa:Option | None = None
-    cache:Option | None = None
-    search:Option | None = None
-    database:Option | None = None
+    crud:int = CRUD.CRUD
+    layer:int = LAYER.CSD
+    aaa:int = AAA.FREE
+    cache:Any | None = None
+    search:Any | None = None
+    database:Any | None = None
 
 
 _TypeT = TypeVar('_TypeT', bound=type)
@@ -131,12 +135,12 @@ _TypeT = TypeVar('_TypeT', bound=type)
 
 def SchemaConfig(
     version:int,
-    crud:str='crud',
-    layer:str='csd',
-    aaa:int=0,
-    cacheOption:Any | None=None,
-    searchOption:Any | None=None,
-    databaseOption:Any | None=None
+    crud:int = CRUD.CRUD,
+    layer:int = LAYER.CSD,
+    aaa:int = AAA.FREE,
+    cache:Option | None=None,
+    search:Option | None=None,
+    database:Option | None=None
 ) -> Callable[[_TypeT], _TypeT]:
 
     def inner(TypedDictClass: _TypeT, /) -> _TypeT:
@@ -156,9 +160,9 @@ def SchemaConfig(
                 crud=crud,
                 layer=layer,
                 aaa=aaa,
-                cacheOption=cacheOption if cacheOption else Option(),
-                searchOption=searchOption if searchOption else Option(),
-                databaseOption=databaseOption if databaseOption else Option()
+                cache=cache if cache else Option(),
+                search=search if search else Option(),
+                database=database if database else Option()
             )
         )
         return TypedDictClass
@@ -170,12 +174,13 @@ def SchemaConfig(
 # Schema Abstraction
 #===============================================================================
 class IdentSchema:
+
     id:ID = None
     sref:Key = ''
     uref:Key = ''
 
     def setID(self, id:ID | None=None):
-        schemaInfo = self.schemaInfo
+        schemaInfo = self.__class__.getSchemaInfo()
         self.id = id if id else str(uuid4())
         self.sref = schemaInfo.sref
         self.uref = f'{schemaInfo.path}/{self.id}'
@@ -183,13 +188,14 @@ class IdentSchema:
 
 
 class StatusSchema:
-    realm:Key = ''
+
+    org:Key = ''
     owner:Key = ''
     deleted:bool = False
     tstamp:int = 0
 
-    def updateStatus(self, realm='', owner='', deleted=False):
-        self.realm = realm
+    def updateStatus(self, org='', owner='', deleted=False):
+        self.org = org
         self.owner = owner
         self.deleted = deleted
         self.tstamp = int(tstamp())
@@ -215,37 +221,28 @@ class BaseSchema(StatusSchema, IdentSchema):
 
     @classmethod
     def getSchemaInfo(cls): return cls.__pydantic_config__['schemaInfo']
-    
-    @property
-    def schema(self): return self.__class__
-
-    @property
-    def schemaInfo(self): return self.schema.getSchemaInfo()
-    
-    @property
-    def reference(self): return Reference(id=self.id, sref=self.sref, uref=self.uref)
 
     #===========================================================================
     # crud
     #===========================================================================
-    async def readModel(self, token=None, realm=None):
+    async def readModel(self, token=None, org=None):
         if not self.id: raise EpException(400, 'Bad Request')
-        info = self.schemaInfo
-        if 'r' in info.crud:
+        schemaInfo = self.__class__.getSchemaInfo()
+        if CRUD.checkRead(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
-            async with AsyncRest(info.provider) as rest: return self.schema(**(await rest.get(self.uref, headers=headers)))
+            if org: headers['Organization'] = org
+            async with AsyncRest(schemaInfo.provider) as rest: return self.__class__(**(await rest.get(self.uref, headers=headers)))
         else: raise EpException(405, 'Method Not Allowed')
 
     @classmethod
-    async def readModelByID(cls, id:ID, token=None, realm=None):
-        info = cls.getSchemaInfo()
-        if 'r' in info.crud:
+    async def readModelByID(cls, id:ID, token=None, org=None):
+        schemaInfo = cls.getSchemaInfo()
+        if CRUD.checkRead(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
-            async with AsyncRest(info.provider) as rest: return cls(**(await rest.get(f'{info.path}/{id}', headers=headers)))
+            if org: headers['Organization'] = org
+            async with AsyncRest(schemaInfo.provider) as rest: return cls(**(await rest.get(f'{schemaInfo.path}/{id}', headers=headers)))
         else: raise EpException(405, 'Method Not Allowed')
 
     @classmethod
@@ -257,13 +254,13 @@ class BaseSchema(StatusSchema, IdentSchema):
         skip:int | None=None,
         archive:bool | None=None,
         token=None,
-        realm=None
+        org=None
     ):
-        info = cls.getSchemaInfo()
-        if 'r' in info.crud:
+        schemaInfo = cls.getSchemaInfo()
+        if CRUD.checkRead(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             query = {}
             if filter: query['$filter'] = filter
             if orderBy and order:
@@ -272,8 +269,8 @@ class BaseSchema(StatusSchema, IdentSchema):
             if size: query['$size'] = size
             if skip: query['$skip'] = skip
             if archive: query['$archive'] = archive
-            url = f'{info.path}?{urlencode(query)}' if query else info.path
-            async with AsyncRest(info.provider) as rest: models = await rest.get(url, headers=headers)
+            url = f'{schemaInfo.path}?{urlencode(query)}' if query else schemaInfo.path
+            async with AsyncRest(schemaInfo.provider) as rest: models = await rest.get(url, headers=headers)
             return [cls(**model) for model in models]
         else: raise EpException(405, 'Method Not Allowed')
 
@@ -282,76 +279,78 @@ class BaseSchema(StatusSchema, IdentSchema):
         filter:str | None=None,
         archive:bool | None=None,
         token=None,
-        realm=None
+        org=None
     ):
-        info = cls.getSchemaInfo()
-        if 'r' in info.crud:
+        schemaInfo = cls.getSchemaInfo()
+        if CRUD.checkRead(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             query = {}
             if filter: query['$filter'] = filter
             if archive: query['$archive'] = archive
-            url = f'{info.path}/count?{urlencode(query)}' if query else f'{info.path}/count'
-            async with AsyncRest(info.provider) as rest: count = await rest.get(url, headers=headers)
+            url = f'{schemaInfo.path}/count?{urlencode(query)}' if query else f'{schemaInfo.path}/count'
+            async with AsyncRest(schemaInfo.provider) as rest: count = await rest.get(url, headers=headers)
             return ModelCount(**count)
         else: raise EpException(405, 'Method Not Allowed')
 
-    async def createModel(self, token=None, realm=None):
-        info = self.schemaInfo
-        if 'c' in info.crud:
+    async def createModel(self, token=None, org=None):
+        schemaInfo = self.__class__.getSchemaInfo()
+        if CRUD.checkCreate(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             data = self.dict()
             data['id'] = '00000000-0000-0000-0000-000000000000'
-            async with AsyncRest(info.provider) as rest: model = await rest.post(f'{info.path}', headers=headers, json=data)
-            return self.schema(**model)
+            async with AsyncRest(schemaInfo.provider) as rest: model = await rest.post(f'{schemaInfo.path}', headers=headers, json=data)
+            return self.__class__(**model)
         else: raise EpException(405, 'Method Not Allowed')
 
-    async def updateModel(self, token=None, realm=None):
+    async def updateModel(self, token=None, org=None):
         if not self.id: raise EpException(400, 'Bad Request')
-        info = self.schemaInfo
-        if 'u' in info.crud:
+        schemaInfo = self.__class__.getSchemaInfo()
+        if CRUD.checkUpdate(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
-            async with AsyncRest(info.provider) as rest: model = await rest.put(f'{info.path}/{self.id}', headers=headers, json=self.dict())
-            return self.schema(**model)
+            if org: headers['Organization'] = org
+            async with AsyncRest(schemaInfo.provider) as rest: model = await rest.put(f'{schemaInfo.path}/{self.id}', headers=headers, json=self.dict())
+            return self.__class__(**model)
         else: raise EpException(405, 'Method Not Allowed')
 
-    async def deleteModel(self, force=False, token=None, realm=None):
+    async def deleteModel(self, force=False, token=None, org=None):
         if not self.id: raise EpException(400, 'Bad Request')
-        info = self.schemaInfo
-        if 'd' in info.crud:
+        schemaInfo = self.__class__.getSchemaInfo()
+        if CRUD.checkDelete(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             force = '?$force=true' if force else ''
-            async with AsyncRest(info.provider) as rest: status = await rest.delete(f'{info.path}/{self.id}{force}', headers=headers)
+            async with AsyncRest(schemaInfo.provider) as rest: status = await rest.delete(f'{schemaInfo.path}/{self.id}{force}', headers=headers)
             return ModelStatus(**status)
         else: raise EpException(405, 'Method Not Allowed')
 
     @classmethod
-    async def deleteModelByID(cls, id:ID, force=False, token=None, realm=None):
-        info = cls.getSchemaInfo()
-        if 'd' in info.crud:
+    async def deleteModelByID(cls, id:ID, force=False, token=None, org=None):
+        schemaInfo = cls.getSchemaInfo()
+        if CRUD.checkDelete(schemaInfo.crud):
             headers = {}
             if token: headers['Authorization'] = f'Bearer {token.credentials}'
-            if realm: headers['Realm'] = realm
+            if org: headers['Organization'] = org
             force = '?$force=true' if force else ''
-            async with AsyncRest(info.provider) as rest: status = await rest.delete(f'{info.path}/{id}{force}', headers=headers)
+            async with AsyncRest(schemaInfo.provider) as rest: status = await rest.delete(f'{schemaInfo.path}/{id}{force}', headers=headers)
             return ModelStatus(**status)
         else: raise EpException(405, 'Method Not Allowed')
 
 
 class ProfSchema:
+
     name:Key = ''
     displayName:str = ''
     description:str = ''
 
 
 class TagSchema:
+
     tags:list[str] = []
 
     def setTag(self, tag):
@@ -364,6 +363,7 @@ class TagSchema:
 
 
 class MetaSchema:
+
     metadata:str = '{}'
 
     def getMeta(self, key):
@@ -388,45 +388,3 @@ class MetaSchema:
     def setMetadata(self, **metadata):
         self.metadata = json.dumps(metadata, separators=(',', ':'))
         return self
-
-
-#===============================================================================
-# Auth Schema
-#===============================================================================
-@SchemaConfig(
-version=1,
-aaa=AAA.AA,
-cacheOption=Option(expire=SECONDS.HOUR),
-searchOption=Option(expire=SECONDS.WEEK))
-class Policy(BaseModel, ProfSchema, BaseSchema):
-    readAllowed: list[str] = []
-    createAllowed: list[str] = []
-    updateAllowed: list[str] = []
-    deleteAllowed: list[str] = []
-
-    
-class AuthInfo(BaseModel):
-    realm:str
-    username:str
-    admin:bool
-    policy:list[str]
-    readAllowed:list[str]
-    createAllowed:list[str]
-    updateAllowed:list[str]
-    deleteAllowed:list[str]
-
-    def checkRealm(self, realm): return True if self.realm == realm else False
-
-    def checkUsername(self, username): return True if self.username == username else False
-
-    def checkAccount(self, realm, username): return True if self.realm == realm and self.owner == username else False
-
-    def checkAdmin(self): return self.admin
-
-    def checkReadAllowed(self, sref): return True if sref in self.readAllowed else False
-
-    def checkCreateAllowed(self, sref): return True if sref in self.createAllowed else False
-
-    def checkUpdateAllowed(self, sref): return True if sref in self.updateAllowed else False
-
-    def checkDeleteAllowed(self, sref): return True if sref in self.deleteAllowed else False

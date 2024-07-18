@@ -9,16 +9,17 @@ Equal Plus
 #===============================================================================
 import traceback
 from typing import Annotated, Any, List, Literal
-from fastapi import Request, BackgroundTasks, Query, Depends
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, APIKeyHeader
+from fastapi import FastAPI, Request, BackgroundTasks, Query
 from pydantic import BaseModel
 from luqum.parser import parser as parseLucene
-from stringcase import snakecase
+from stringcase import snakecase, pathcase
 
-from .constants import AuthLevel, AuthorizationHeader, RealmHeader
+from .constants import CRUD, LAYER, AAA, ORG_HEADER, AUTH_HEADER
 from .exceptions import EpException
 from .schedules import asleep, runBackground
-from .models import ServiceHealth, ModelStatus, ModelCount, ID, BaseSchema, SearchOption, Policy
+from .models import Search, ID, BaseSchema, ServiceHealth, ModelStatus, ModelCount
+from .auth import RBAC
+from .utils import getConfig, Logger
 
 
 #===============================================================================
@@ -26,14 +27,24 @@ from .models import ServiceHealth, ModelStatus, ModelCount, ID, BaseSchema, Sear
 #===============================================================================
 class BaseControl:
 
-    def __init__(self, api, config, background=False):
-        self.api = api
-        self.api.router.add_event_handler("startup", self.__startup__)
-        self.api.router.add_event_handler("shutdown", self.__shutdown__)
-        self.config = config
+    def __init__(self, confPath, background=False):
+        self.config = getConfig(confPath)
+        Logger.register(self.config)
+
+        self._title = snakecase(self.config['default']['title'])
+        self._version = int(self.config['service']['version'])
+        self._uri = f'/{pathcase(self._title)}'
         self._background = background
-        self._title = snakecase(config['default']['title'])
-        self._version = int(config['service']['api_version'])
+
+        self._api = FastAPI(
+            title=self._title,
+            docs_url=f'{self._uri}/docs',
+            openapi_url=f'{self._uri}/openapi.json',
+            separate_input_output_schemas=False
+        )
+
+        self._api.router.add_event_handler('startup', self.__startup__)
+        self._api.router.add_event_handler('shutdown', self.__shutdown__)
 
     @property
     def title(self): return self._title
@@ -41,35 +52,45 @@ class BaseControl:
     @property
     def version(self): return self._version
 
+    @property
+    def uri(self): return self._uri
+
+    @property
+    def api(self): return self._api
+
     async def __startup__(self):
+        LOG.INFO('run startup')
         await self.startup()
         if self._background: await runBackground(self.__background__())
-        self.api.add_api_route(
+        self._api.add_api_route(
             methods=['GET'],
-            path=f'/{snakecase(self.title)}/health',
+            path=f'/{self._title}/health',
             endpoint=self.__health__,
             response_model=ServiceHealth,
-            tags=['Health'],
+            tags=['Service'],
             name='Health'
         )
-
-    async def __shutdown__(self):
-        await self.shutdown()
-
-    async def __background__(self):
-        while self._background: await self.background()
-
-    async def __health__(self) -> ServiceHealth: return await self.health()
+        LOG.INFO('startup finished')
 
     async def startup(self): pass
 
+    async def __shutdown__(self):
+        LOG.INFO('run shutdown')
+        await self.shutdown()
+        LOG.INFO('shutdown finished')
+
     async def shutdown(self): pass
 
-    async def health(self) -> ServiceHealth: return ServiceHealth(title=self.title, status='OK', healthy=True)
+    async def __background__(self):
+        LOG.INFO('run background')
+        while self._background: await self.background()
+        LOG.INFO('background finished')
 
-    async def background(self):
-        LOG.INFO('run background process')
-        await asleep(1)
+    async def background(self): await asleep(1)
+
+    async def __health__(self) -> ServiceHealth: return await self.health()
+
+    async def health(self) -> ServiceHealth: return ServiceHealth(title=self.title, status='OK', healthy=True)
 
 
 #===============================================================================
@@ -77,126 +98,122 @@ class BaseControl:
 #===============================================================================
 class MeshControl(BaseControl):
 
-    def __init__(self, api, config, background:bool=False):
-        BaseControl.__init__(self, api, config, background)
-        if 'providers' not in self.config: raise Exception('[providers] configuration is not in module.conf')
-        self.providers = self.config['providers']
+    def __init__(self, confPath, background:bool=False):
+        BaseControl.__init__(self, confPath, background)
+        if 'providers' not in self.config: raise Exception('[providers] configuration is not in module.ini')
+        self._providers = self.config['providers']
 
     async def registerModel(self, schema:BaseSchema, service):
-        if service not in self.providers: raise Exception(f'{service} is not in [providers] configuration')
-        schema.setSchemaInfo(self.providers[service], service, self.version)
+        if service not in self._providers: raise Exception(f'{service} is not in [providers] configuration')
+        schema.setSchemaInfo(self._providers[service], service, self._version)
         return self
 
 
 #===============================================================================
 # Uerp Control
 #===============================================================================
-realmHeader = APIKeyHeader(name='Realm', auto_error=False)
-authorizationHeader = HTTPBearer()
-
-
 class UerpControl(BaseControl):
 
-    def __init__(self, api, config, background:bool=False, authDriver:Any=None, cacheDriver:Any=None, searchDriver:Any=None, databaseDriver:Any=None):
-        BaseControl.__init__(self, api, config, background)
+    def __init__(self, confPath, background:bool=False, authDriver:Any=None, cacheDriver:Any=None, searchDriver:Any=None, databaseDriver:Any=None):
+        BaseControl.__init__(self, confPath, background)
 
-        self._uerpUpdatePolicySec = int(config['service']['update_policy_sec'])
-
+        self._uerpRefreshRBACInterval = int(self.config['auth']['refresh_rbac_interval'])
+        self._uerpRefreshInfoInterval = int(self.config['auth']['refresh_info_interval'])
         self._uerpPathToSchemaMap = {}
 
-        self._uerpAuthDriver = authDriver
-        self._uerpCacheDriver = cacheDriver
-        self._uerpSearchDriver = searchDriver
-        self._uerpDatabaseDriver = databaseDriver
-
-        self._auth = None
-        self._cache = None
-        self._search = None
-        self._database = None
+        self._auth = authDriver(self.config) if authDriver else None
+        self._cache = cacheDriver(self.config) if cacheDriver else None
+        self._search = searchDriver(self.config) if searchDriver else None
+        self._database = databaseDriver(self.config) if databaseDriver else None
 
     async def __startup__(self):
-        if self._uerpAuthDriver and not self._auth:
-            self._auth = await self._uerpAuthDriver(self.config).connect()
-        if self._uerpDatabaseDriver and not self._database:
-            self._database = await self._uerpDatabaseDriver(self.config).connect()
-        if self._uerpSearchDriver and not self._search:
-            self._search = await self._uerpSearchDriver(self.config).connect()
-        if self._uerpCacheDriver and not self._cache:
-            self._cache = await self._uerpCacheDriver(self.config).connect()
+        if self._auth: await self._auth.connect()
+        if self._database: await self._database.connect()
+        if self._search: await self._search.connect()
+        if self._cache: await self._cache.connect()
 
         await BaseControl.__startup__(self)
 
-        await self.registerModel(Policy)
-        await runBackground(self.__load_policies__())
+        self._refreshRBAC = True
+        await self.registerModel(RBAC)
+        await runBackground(self.__refresh_info__())
+        await runBackground(self.__refresh_rbac__())
+
+    async def __refresh_info__(self):
+        while self._refreshRBAC:
+            try: await self._auth.refreshInfos()
+            except Exception as e:
+                LOG.ERROR(e)
+                traceback.print_exc()
+            await asleep(self._uerpRefreshInfoInterval)
+
+    async def __refresh_rbac__(self):
+        search = Search()
+        while self._refreshRBAC:
+            try:
+                if self._database:
+                    rbacs = await self._database.search(RBAC, search)
+                    if rbacs:
+                        if self._auth: await self._auth.refreshRBACs(rbacs)
+                        if self._cache: await self._cache.create(RBAC, *rbacs)
+                        if self._search: await self._search.create(RBAC, *rbacs)
+                elif self._search:
+                    rbacs = await self._search.search(RBAC, search)
+                    if rbacs:
+                        if self._auth: await self._auth.refreshRBACs(rbacs)
+                        if self._cache: await self._cache.create(RBAC, *rbacs)
+            except Exception as e:
+                LOG.ERROR(e)
+                traceback.print_exc()
+            await asleep(self._uerpRefreshRBACInterval)
 
     async def __shutdown__(self):
+        self._refreshRBAC = False
         await BaseControl.__shutdown__(self)
         if self._database: await self._database.disconnect()
         if self._search: await self._search.disconnect()
         if self._cache: await self._cache.disconnect()
         if self._auth: await self._auth.disconnect()
 
-    async def __load_policies__(self):
-        while True:
-            try:
-                option = SearchOption()
-                if self._database:
-                    policies = await self._database.search(Policy, option)
-                    if policies:
-                        if self._search: await self._search.create(Policy, *policies)
-                        if self._cache: await self._cache.create(Policy, *policies)
-                        if self._auth: await self._auth.updatePolicyMap(policies)
-                elif self._search:
-                    policies = await self._search.search(Policy, option)
-                    if policies:
-                        if self._cache: await self._cache.create(Policy, *policies)
-                        if self._auth: await self._auth.updatePolicyMap(policies)
-            except Exception as e:
-                LOG.ERROR(e)
-                traceback.print_exc()
-            await asleep(self._uerpUpdatePolicySec)
-
     async def registerModel(self, schema:BaseSchema):
         schema.setSchemaInfo(None, self.title, self.version)
         schemaInfo = schema.getSchemaInfo()
 
-        if 'd' in schemaInfo.layer and self._database: await self._database.registerModel(schema)
-        if 's' in schemaInfo.layer and self._search: await self._search.registerModel(schema)
-        if 'c' in schemaInfo.layer and self._cache: await self._cache.registerModel(schema)
+        if LAYER.checkDatabase(schemaInfo.layer) and self._database: await self._database.registerModel(schema)
+        if LAYER.checkSearch(schemaInfo.layer) and self._search: await self._search.registerModel(schema)
+        if LAYER.checkCache(schemaInfo.layer) and self._cache: await self._cache.registerModel(schema)
 
         self._uerpPathToSchemaMap[schemaInfo.path] = schema
 
-        if 'c' in schemaInfo.crud:
-            if AuthLevel.checkAuthorization(schemaInfo.auth):
+        if AAA.checkAuthorization(schemaInfo.aaa):
+            if CRUD.checkCreate(schemaInfo.crud):
                 self.__create_data_with_auth__.__annotations__['model'] = schema
                 self.api.add_api_route(methods=['POST'], path=schemaInfo.path, endpoint=self.__create_data_with_auth__, response_model=schema, tags=schemaInfo.tags, name=f'Create {schemaInfo.name}')
                 self.__create_data_with_auth__.__annotations__['model'] = BaseModel
-            else:
-                self.__create_data_with_free__.__annotations__['model'] = schema
-                self.api.add_api_route(methods=['POST'], path=schemaInfo.path, endpoint=self.__create_data_with_free__, response_model=schema, tags=schemaInfo.tags, name=f'Create {schemaInfo.name}')
-                self.__create_data_with_free__.__annotations__['model'] = BaseModel
-        if 'r' in schemaInfo.crud:
-            if AuthLevel.checkAuthorization(schemaInfo.auth):
-                self.api.add_api_route(methods=['GET'], path=schemaInfo.path, endpoint=self.__search_data_with_auth__, response_model=List[Any], tags=schemaInfo.tags, name=f'Search {schemaInfo.name}')
+            if CRUD.checkRead(schemaInfo.crud):
+                self.api.add_api_route(methods=['GET'], path=schemaInfo.path, endpoint=self.__search_data_with_auth__, response_model=List[schema], tags=schemaInfo.tags, name=f'Search {schemaInfo.name}')
                 self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/count', endpoint=self.__count_data_with_auth__, response_model=ModelCount, tags=schemaInfo.tags, name=f'Count {schemaInfo.name}')
                 self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/{id}', endpoint=self.__read_data_with_auth__, response_model=schema, tags=schemaInfo.tags, name=f'Read {schemaInfo.name}')
-            else:
-                self.api.add_api_route(methods=['GET'], path=schemaInfo.path, endpoint=self.__search_data_with_free__, response_model=List[Any], tags=schemaInfo.tags, name=f'Search {schemaInfo.name}')
-                self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/count', endpoint=self.__count_data_with_free__, response_model=ModelCount, tags=schemaInfo.tags, name=f'Count {schemaInfo.name}')
-                self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/{id}', endpoint=self.__read_data_with_free__, response_model=schema, tags=schemaInfo.tags, name=f'Read {schemaInfo.name}')
-        if 'u' in schemaInfo.crud:
-            if AuthLevel.checkAuthorization(schemaInfo.auth):
+            if CRUD.checkUpdate(schemaInfo.crud):
                 self.__update_data_with_auth__.__annotations__['model'] = schema
                 self.api.add_api_route(methods=['PUT'], path=schemaInfo.path + '/{id}', endpoint=self.__update_data_with_auth__, response_model=schema, tags=schemaInfo.tags, name=f'Update {schemaInfo.name}')
                 self.__update_data_with_auth__.__annotations__['model'] = BaseModel
-            else:
+            if CRUD.checkDelete(schemaInfo.crud):
+                self.api.add_api_route(methods=['DELETE'], path=schemaInfo.path + '/{id}', endpoint=self.__delete_data_with_auth__, response_model=ModelStatus, tags=schemaInfo.tags, name=f'Delete {schemaInfo.name}')
+        else:
+            if CRUD.checkCreate(schemaInfo.crud):
+                self.__create_data_with_free__.__annotations__['model'] = schema
+                self.api.add_api_route(methods=['POST'], path=schemaInfo.path, endpoint=self.__create_data_with_free__, response_model=schema, tags=schemaInfo.tags, name=f'Create {schemaInfo.name}')
+                self.__create_data_with_free__.__annotations__['model'] = BaseModel
+            if CRUD.checkRead(schemaInfo.crud):
+                self.api.add_api_route(methods=['GET'], path=schemaInfo.path, endpoint=self.__search_data_with_free__, response_model=List[schema], tags=schemaInfo.tags, name=f'Search {schemaInfo.name}')
+                self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/count', endpoint=self.__count_data_with_free__, response_model=ModelCount, tags=schemaInfo.tags, name=f'Count {schemaInfo.name}')
+                self.api.add_api_route(methods=['GET'], path=schemaInfo.path + '/{id}', endpoint=self.__read_data_with_free__, response_model=schema, tags=schemaInfo.tags, name=f'Read {schemaInfo.name}')
+            if CRUD.checkUpdate(schemaInfo.crud):
                 self.__update_data_with_free__.__annotations__['model'] = schema
                 self.api.add_api_route(methods=['PUT'], path=schemaInfo.path + '/{id}', endpoint=self.__update_data_with_free__, response_model=schema, tags=schemaInfo.tags, name=f'Update {schemaInfo.name}')
                 self.__update_data_with_free__.__annotations__['model'] = BaseModel
-        if 'd' in schemaInfo.crud:
-            if AuthLevel.checkAuthorization(schemaInfo.auth):
-                self.api.add_api_route(methods=['DELETE'], path=schemaInfo.path + '/{id}', endpoint=self.__delete_data_with_auth__, response_model=ModelStatus, tags=schemaInfo.tags, name=f'Delete {schemaInfo.name}')
-            else:
+            if CRUD.checkDelete(schemaInfo.crud):
                 self.api.add_api_route(methods=['DELETE'], path=schemaInfo.path + '/{id}', endpoint=self.__delete_data_with_free__, response_model=ModelStatus, tags=schemaInfo.tags, name=f'Delete {schemaInfo.name}')
 
         return self
@@ -206,17 +223,22 @@ class UerpControl(BaseControl):
         request:Request,
         background:BackgroundTasks,
         id:ID,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None
+        token: AUTH_HEADER,
+        org: ORG_HEADER=None
     ):
+        id = str(id)
         schema = self._uerpPathToSchemaMap[request.scope['path'].replace(f'/{id}', '')]
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
 
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkReadAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
-        model = await self.__read_data__(background, schema, str(id))
-        if not authInfo.checkRealm(model.realm): raise EpException(404, 'Not Found')
-        if AuthLevel.checkAccount(schemaInfo.auth) and not authInfo.checkUsername(model.owner): raise EpException(403, 'Forbidden')
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkReadACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        model = await self.__read_data__(
+            background,
+            schema,
+            id
+        )
+        if not authInfo.checkOrg(model.org): raise EpException(404, 'Not Found')
+        if AAA.checkAccount(schemaInfo.aaa) and not authInfo.checkUsername(model.owner): raise EpException(403, 'Forbidden')
         return model
 
     async def __read_data_with_free__(
@@ -225,8 +247,11 @@ class UerpControl(BaseControl):
         background:BackgroundTasks,
         id:ID
     ):
-        schema = self._uerpPathToSchemaMap[request.scope['path'].replace(f'/{id}', '')]
-        return await self.__read_data__(background, schema, str(id))
+        return await self.__read_data__(
+            background,
+            self._uerpPathToSchemaMap[request.scope['path'].replace(f'/{id}', '')],
+            str(id)
+        )
 
     async def __read_data__(
         self,
@@ -235,34 +260,36 @@ class UerpControl(BaseControl):
         id
     ):
         schemaInfo = schema.getSchemaInfo()
-        if schemaInfo.cache:
-            try: model = await schemaInfo.cache.read(schema, id)
+
+        if LAYER.checkCache(schemaInfo.layer) and self._cache:
+            try: return schema(**(await self._cache.read(schema, id)))
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-            if model: return schema(**model)
-        if schemaInfo.search:
-            try: model = await schemaInfo.search.read(schema, id)
-            except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
-            except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-            if model:
-                if schemaInfo.cache and background: background.add_task(schemaInfo.cache.create, schema, model)
+        if LAYER.checkSearch(schemaInfo.layer) and self._search:
+            try:
+                model = await self._search.read(schema, id)
+                if model and background and LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, model)
                 return schema(**model)
-        if schemaInfo.database:
-            try: model = await schemaInfo.database.read(schema, id)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-            if model:
-                if schemaInfo.cache and background: background.add_task(schemaInfo.cache.create, schema, model)
-                if schemaInfo.search and background: background.add_task(schemaInfo.search.create, schema, model)
+        if LAYER.checkDatabase(schemaInfo.layer) and self._database:
+            try:
+                model = await self._database.read(schema, id)
+                if model and background:
+                    if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, model)
+                    if LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.create, schema, model)
                 return schema(**model)
-        raise EpException(404, 'Not Found')
+            except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
+            except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
+
+        raise EpException(501, 'Not Implemented')
 
     async def __search_data_with_auth__(
         self,
         request:Request,
         background:BackgroundTasks,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None,
+        token:AUTH_HEADER,
+        org:ORG_HEADER=None,
         fields:Annotated[List[str] | None, Query(alias='$f', description='looking fields ex) $f=field1&$f=field2')]=None,
         filter:Annotated[str | None, Query(alias='$filter', description='lucene type filter ex) $filter=fieldName:yourSearchText')]=None,
         orderBy:Annotated[str | None, Query(alias='$orderby', description='ordered by specific field')]=None,
@@ -286,21 +313,23 @@ class UerpControl(BaseControl):
         elif archive: archive = bool(archive)
 
         schema = self._uerpPathToSchemaMap[request.scope['path']]
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkReadAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
-        if AuthLevel.checkAccount(schemaInfo.auth): query['owner'] = authInfo.username
-        query['realm'] = authInfo.realm
+
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkReadACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        if AAA.checkAccount(schemaInfo.aaa): query['owner'] = authInfo.username
+        query['org'] = authInfo.org
         qFilter = []
         for key, val in query.items(): qFilter.append(f'{key}:{val}')
         qFilter = ' AND '.join(qFilter)
         if filter: filter = f'({qFilter}) AND ({filter})'
         else: filter = qFilter
         filter = parseLucene.parse(filter)
+
         return await self.__search_data__(
             background,
             schema,
-            SearchOption(fields=fields, filter=filter, orderBy=orderBy, order=order, size=size, skip=skip),
+            Search(fields=fields, filter=filter, orderBy=orderBy, order=order, size=size, skip=skip),
             archive
         )
 
@@ -337,11 +366,11 @@ class UerpControl(BaseControl):
             if filter: filter = f'({qFilter}) AND ({filter})'
             else: filter = qFilter
         if filter: filter = parseLucene.parse(filter)
-        schema = self._uerpPathToSchemaMap[request.scope['path']]
+
         return await self.__search_data__(
             background,
-            schema,
-            SearchOption(fields=fields, filter=filter, orderBy=orderBy, order=order, size=size, skip=skip),
+            self._uerpPathToSchemaMap[request.scope['path']],
+            Search(fields=fields, filter=filter, orderBy=orderBy, order=order, size=size, skip=skip),
             archive
         )
 
@@ -349,42 +378,44 @@ class UerpControl(BaseControl):
         self,
         background,
         schema,
-        option,
+        search,
         archive
     ):
         schemaInfo = schema.getSchemaInfo()
-        if archive and schemaInfo.database:
-            try: models = await schemaInfo.database.search(schema, option)
+
+        if archive and LAYER.checkDatabase(schemaInfo.layer) and self._database:
+            try:
+                models = await self._database.search(schema, search)
+                if models and not search.fields and LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.create, schema, *models)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e:
-                if schemaInfo.search:
-                    try: models = await schemaInfo.search.search(schema, option)
+                if LAYER.checkSearch(schemaInfo.layer) and self._search:
+                    try: models = await self._search(schema, search)
                     except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
                     except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-                else: LOG.ERROR('could not match driver'); traceback.print_exc(); raise EpException(501, 'Not Implemented')
-            else:
-                if models and schemaInfo.search and not option.fields: background.add_task(schemaInfo.search.create, schema, *models)
-            if models and schemaInfo.cache and not option.fields: background.add_task(schemaInfo.cache.create, schema, *models)
+                else: raise EpException(501, 'Not Implemented')
+            if models and not search.fields and LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, *models)
             return models
-        elif schemaInfo.search:
-            try: models = await schemaInfo.search.search(schema, option)
+        elif LAYER.checkSearch(schemaInfo.layer) and self._search:
+            try: models = await self._search.search(schema, search)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e:
-                if schemaInfo.database:
-                    try: models = await schemaInfo.database.search(schema, option)
+                if LAYER.checkDatabase(schemaInfo.layer) and self._database:
+                    try: models = await self._database.search(schema, search)
                     except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
                     except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-                    if models and schemaInfo.search and not option.fields: background.add_task(schemaInfo.search.create, schema, *models)
-                else: LOG.ERROR('could not match driver'); traceback.print_exc(); raise EpException(501, 'Not Implemented')
-            if models and schemaInfo.cache and not option.fields: background.add_task(schemaInfo.cache.create, schema, *models)
+                    if models and not search.fields and LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.create, schema, *models)
+                else: raise EpException(501, 'Not Implemented')
+            if models and not search.fields and LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, *models)
             return models
+
         raise EpException(501, 'Not Implemented')
 
     async def __count_data_with_auth__(
         self,
         request:Request,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None,
+        token: AUTH_HEADER,
+        org: ORG_HEADER=None,
         filter:Annotated[str | None, Query(alias='$filter', description='lucene type filter ex) $filter=fieldName:yourSearchText')]=None,
         archive:Annotated[Literal['true', 'false', ''], Query(alias='$archive', description='searching from archive aka database')]=None
     ):
@@ -394,15 +425,16 @@ class UerpControl(BaseControl):
         if archive == '': archive = True
         elif archive: archive = bool(archive)
 
-        path = request.scope['path'].replace('/count', '')
-        qstr = request.scope['query_string']
+        uref = request.scope['path']
+        path = uref.replace('/count', '')
+        queryString = request.scope['query_string']
 
         schema = self._uerpPathToSchemaMap[path]
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkReadAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
-        if AuthLevel.checkAccount(schemaInfo.auth): query['owner'] = authInfo.username
-        query['realm'] = authInfo.realm
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkReadACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        if AAA.checkAccount(schemaInfo.aaa): query['owner'] = authInfo.username
+        query['org'] = authInfo.org
 
         qFilter = []
         for key, val in query.items(): qFilter.append(f'{key}:{val}')
@@ -411,12 +443,11 @@ class UerpControl(BaseControl):
         else: filter = qFilter
         filter = parseLucene.parse(filter)
 
-        result = await self.__count_data__(
+        return ModelCount(sref=schema.sref, uref=uref, query=queryString, result=await self.__count_data__(
             schema,
-            SearchOption(filter=filter),
+            Search(filter=filter),
             archive
-        )
-        return ModelCount(path=path, query=qstr, result=result)
+        ))
 
     async def __count_data_with_free__(
         self,
@@ -430,8 +461,9 @@ class UerpControl(BaseControl):
         if archive == '': archive = True
         elif archive: archive = bool(archive)
 
-        path = request.scope['path'].replace('/count', '')
-        qstr = request.scope['query_string']
+        uref = request.scope['path']
+        path = uref.replace('/count', '')
+        queryString = request.scope['query_string']
 
         if query:
             qFilter = []
@@ -442,52 +474,53 @@ class UerpControl(BaseControl):
         if filter: filter = parseLucene.parse(filter)
 
         schema = self._uerpPathToSchemaMap[path]
-        result = await self.__count_data__(
+        return ModelCount(sref=schema.sref, uref=uref, query=queryString, result=await self.__count_data__(
             schema,
-            SearchOption(filter=filter),
+            Search(filter=filter),
             archive
-        )
-        return ModelCount(path=path, query=qstr, result=result)
+        ))
 
     async def __count_data__(
         self,
         schema,
-        option,
+        search,
         archive
     ):
         schemaInfo = schema.getSchemaInfo()
-        if archive and schemaInfo.database:
-            try: return await schemaInfo.database.count(schema, option)
+
+        if archive and LAYER.checkDatabase(schemaInfo.layer) and self._database:
+            try: return await self._database.count(schema, search)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e:
-                if schemaInfo.search:
-                    try: return await schemaInfo.search.count(schema, option)
+                if LAYER.checkSearch(schemaInfo.layer) and self._search:
+                    try: return await self._search.count(schema, search)
                     except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
                     except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-                else: LOG.ERROR('could not match driver'); traceback.print_exc(); raise EpException(501, 'Not Implemented')  # no driver
-        elif schemaInfo.search:
-            try: return await schemaInfo.search.count(schema, option)
+                else: raise EpException(501, 'Not Implemented')
+        elif LAYER.checkSearch(schemaInfo.layer) and self._search:
+            try: return await self._search.count(schema, search)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e:
-                if schemaInfo.database:
-                    try: return await schemaInfo.database.count(schema, option)
+                if LAYER.checkDatabase(schemaInfo.layer) and self._database:
+                    try: return await self._database.count(schema, search)
                     except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
                     except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-                else: LOG.ERROR('could not match driver'); traceback.print_exc(); raise EpException(501, 'Not Implemented')  # no driver
-        raise EpException(501, 'Not Implemented')  # no driver
+                else: raise EpException(501, 'Not Implemented')
+
+        raise EpException(501, 'Not Implemented')
 
     async def __create_data_with_auth__(
         self,
         background:BackgroundTasks,
         model:BaseModel,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None
+        token: AUTH_HEADER,
+        org: ORG_HEADER=None
     ):
         schema = model.__class__
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkCreateAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
-        await self.__create_data__(background, schema, model.setID().updateStatus(realm=authInfo.realm, owner=authInfo.username).model_dump())
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkCreateACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        await self.__create_data__(background, schema, model.setID().updateStatus(org=authInfo.org, owner=authInfo.username).model_dump())
         return model
 
     async def __create_data_with_free__(
@@ -495,8 +528,7 @@ class UerpControl(BaseControl):
         background:BackgroundTasks,
         model:BaseModel
     ):
-        schema = model.__class__
-        await self.__create_data__(background, schema, model.setID().updateStatus().model_dump())
+        await self.__create_data__(background, model.__class__, model.setID().updateStatus().model_dump())
         return model
 
     async def __create_data__(
@@ -506,42 +538,44 @@ class UerpControl(BaseControl):
         data
     ):
         schemaInfo = schema.getSchemaInfo()
-        if schemaInfo.database:
+
+        if LAYER.checkDatabase(schemaInfo.layer) and self._database:
             try:
-                if (await schemaInfo.database.create(schema, data))[0]:
-                    if schemaInfo.cache: background.add_task(schemaInfo.cache.create, schema, data)
-                    if schemaInfo.search: background.add_task(schemaInfo.search.create, schema, data)
+                if (await self._database.create(schema, data))[0]:
+                    if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, data)
+                    if LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.create, schema, data)
                 else: raise EpException(409, 'Conflict')
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.search:
+        elif LAYER.checkSearch(schemaInfo.layer) and self._search:
             try:
-                await schemaInfo.search.create(schema, data)
-                if schemaInfo.cache: background.add_task(schemaInfo.cache.create, schema, data)
+                await self._search.create(schema, data)
+                if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.create, schema, data)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.cache:
-            try: await schemaInfo.cache.create(schema, data)
+        elif LAYER.checkCache(schemaInfo.layer) and self._cache:
+            try: await self._cache.create(schema, data)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
+        else: raise EpException(501, 'Not Implemented')
 
     async def __update_data_with_auth__(
         self,
         background:BackgroundTasks,
         id:ID,
         model:BaseModel,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None
+        token: AUTH_HEADER,
+        org: ORG_HEADER=None
     ):
         id = str(id)
         schema = model.__class__
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkUpdateAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkUpdateACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
         origin = await self.__read_data__(None, schema, id)
-        if not authInfo.checkRealm(origin.realm): raise EpException(403, 'Forbidden')
-        if AuthLevel.checkAccount(schemaInfo.auth) and not authInfo.checkUsername(origin.owner): raise EpException(403, 'Forbidden')
-        await self.__update_data__(background, schema, model.setID(id).updateStatus(realm=authInfo.realm, owner=authInfo.username).model_dump())
+        if not authInfo.checkOrg(origin.org): raise EpException(403, 'Forbidden')
+        if AAA.checkAccount(schemaInfo.aaa) and not authInfo.checkUsername(origin.owner): raise EpException(403, 'Forbidden')
+        await self.__update_data__(background, schema, model.setID(id).updateStatus(org=authInfo.org, owner=authInfo.username).model_dump())
         return model
 
     async def __update_data_with_free__(
@@ -561,48 +595,51 @@ class UerpControl(BaseControl):
         data
     ):
         schemaInfo = schema.getSchemaInfo()
-        if schemaInfo.database:
+
+        if LAYER.checkDatabase(schemaInfo.layer) and self._database:
             try:
-                if (await schemaInfo.database.update(schema, data))[0]:
-                    if schemaInfo.cache: background.add_task(schemaInfo.cache.update, schema, data)
-                    if schemaInfo.search: background.add_task(schemaInfo.search.update, schema, data)
+                if (await self._database.update(schema, data))[0]:
+                    if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.update, schema, data)
+                    if LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.update, schema, data)
                 else: raise EpException(409, 'Conflict')
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.search:
+        elif LAYER.checkSearch(schemaInfo.layer) and self._search:
             try:
-                await schemaInfo.search.update(schema, data)
-                if schemaInfo.cache: background.add_task(schemaInfo.cache.update, schema, data)
+                await self._search.update(schema, data)
+                if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.update, schema, data)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.cache:
-            try: await schemaInfo.cache.update(schema, data)
+        elif LAYER.checkCache(schemaInfo.layer) and self._cache:
+            try: await self._cache.update(schema, data)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
+        else: raise EpException(501, 'Not Implemented')
 
     async def __delete_data_with_auth__(
         self,
         request:Request,
         background:BackgroundTasks,
         id:ID,
-        token: AuthorizationHeader,
-        realm: RealmHeader=None,
+        token: AUTH_HEADER,
+        org: ORG_HEADER=None,
         force:Annotated[Literal['true', 'false', ''], Query(alias='$force')]=None,
     ):
         if force == '': force = True
         elif force: force = bool(force)
 
         id = str(id)
-        path = request.scope['path'].replace(f'/{id}', '')
+        uref = request.scope['path']
+        path = uref.replace(f'/{id}', '')
         schema = self._uerpPathToSchemaMap[path]
-        authInfo = await self._auth.getAuthInfo(realm, token)
+        authInfo = await self._auth.getAuthInfo(token.credentials, org)
         schemaInfo = schema.getSchemaInfo()
-        if AuthLevel.checkAuthentication(schemaInfo.auth) and not authInfo.checkAdmin() and not authInfo.checkDeleteAllowed(schemaInfo.sref): raise EpException(403, 'Forbidden')
+        if AAA.checkAuthentication(schemaInfo.aaa) and not authInfo.checkAdmin() and not authInfo.checkDeleteACL(schemaInfo.sref): raise EpException(403, 'Forbidden')
         origin = await self.__read_data__(None, schema, id)
-        if not authInfo.checkRealm(origin.realm): raise EpException(403, 'Forbidden')
-        if AuthLevel.checkAccount(schemaInfo.auth) and not authInfo.checkUsername(origin.owner): raise EpException(403, 'Forbidden')
-        await self.__delete_data__(background, schema, id, origin.setID(id).updateStatus(realm=authInfo.realm, owner=authInfo.username, deleted=True).model_dump(), force)
-        return ModelStatus(id=id, status='deleted')
+        if not authInfo.checkOrg(origin.org): raise EpException(403, 'Forbidden')
+        if AAA.checkAccount(schemaInfo.aaa) and not authInfo.checkUsername(origin.owner): raise EpException(403, 'Forbidden')
+        await self.__delete_data__(background, schema, id, origin.setID(id).updateStatus(org=authInfo.org, owner=authInfo.username, deleted=True).model_dump(), force)
+        return ModelStatus(id=id, sref=schemaInfo.sref, uref=uref, status='deleted')
 
     async def __delete_data_with_free__(
         self,
@@ -615,11 +652,13 @@ class UerpControl(BaseControl):
         elif force: force = bool(force)
 
         id = str(id)
-        path = request.scope['path'].replace(f'/{id}', '')
+        uref = request.scope['path']
+        path = uref.replace(f'/{id}', '')
         schema = self._uerpPathToSchemaMap[path]
+        schemaInfo = schema.getSchemaInfo()
         model = await self.__read_data__(None, schema, id)
         await self.__delete_data__(background, schema, id, model.setID(id).updateStatus(deleted=True).model_dump(), force)
-        return ModelStatus(id=id, status='deleted')
+        return ModelStatus(id=id, sref=schemaInfo.sref, uref=uref, status='deleted')
 
     async def __delete_data__(
         self,
@@ -630,29 +669,31 @@ class UerpControl(BaseControl):
         force
     ):
         schemaInfo = schema.getSchemaInfo()
-        if force and schemaInfo.database:
+
+        if force and LAYER.checkDatabase(schemaInfo.layer) and self._database:
             try:
-                if await schemaInfo.database.delete(schema, id):
-                    if schemaInfo.cache: background.add_task(schemaInfo.cache.delete, schema, id)
-                    if schemaInfo.search: background.add_task(schemaInfo.search.delete, schema, id)
+                if await self._database.delete(schema, id):
+                    if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.delete, schema, id)
+                    if LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.delete, schema, id)
                 else: raise EpException(409, 'Conflict')
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.database:
+        elif LAYER.checkDatabase(schemaInfo.layer) and self._database:
             try:
-                if (await schemaInfo.database.update(schema, data))[0]:
-                    if schemaInfo.cache: background.add_task(schemaInfo.cache.delete, schema, id)
-                    if schemaInfo.search: background.add_task(schemaInfo.search.delete, schema, id)
+                if (await self._database.update(schema, data))[0]:
+                    if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.delete, schema, id)
+                    if LAYER.checkSearch(schemaInfo.layer) and self._search: background.add_task(self._search.delete, schema, id)
                 else: raise EpException(409, 'Conflict')
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.search:
+        elif LAYER.checkSearch(schemaInfo.layer) and self._search:
             try:
-                await schemaInfo.search.delete(schema, id)
-                if schemaInfo.cache: background.add_task(schemaInfo.cache.delete, schema, id)
+                await self._search.delete(schema, id)
+                if LAYER.checkCache(schemaInfo.layer) and self._cache: background.add_task(self._cache.delete, schema, id)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
-        elif schemaInfo.cache:
-            try: await schemaInfo.cache.delete(schema, id)
+        elif LAYER.checkCache(schemaInfo.layer) and self._cache:
+            try: await self._cache.delete(schema, id)
             except LookupError as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(400, 'Bad Request')
             except Exception as e: LOG.ERROR(e); traceback.print_exc(); raise EpException(503, 'Service Unavailable')
+        else: raise EpException(501, 'Not Implemented')
